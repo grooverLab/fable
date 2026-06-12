@@ -1,184 +1,132 @@
-# fable — high-fidelity transcript memory for Claude Code
+<div align="center">
 
-**Claude Code compacts your context (lossy) and deletes session files
-after 30 days. fable remembers everything** — locally, byte-identical,
-searchable, and weavable into new sessions.
+# fable
+
+## Your Claude already has a memory. fable unlocks it.
+
+</div>
+
+Every conversation you've ever had with Claude Code is already saved on
+your machine — every decision, every debugging hunt, every 2 AM
+breakthrough, word for word. **Claude just isn't allowed to use it.**
+
+Mid-session, compaction builds a wall: everything behind it is locked away
+to save tokens, and Claude carries on with a thin summary. `/clear` wipes
+the slate. And after 30 days, Claude Code quietly **deletes the files
+themselves**. Your project's real memory — locked, then destroyed, by
+design.
+
+Everyone else sells you a *replacement* memory: summaries, extracted
+facts, vector stores. fable does something different — **it unlocks the
+real one.**
 
 ![fable demo](demo/fable.gif)
 
 ```bash
-pipx install git+https://github.com/grooverLab/fable   # or: uv tool install …
-fable discover            # indexes every Claude Code project on your machine
-fable serve               # the dashboard, at 127.0.0.1:8765
+pipx install git+https://github.com/grooverLab/fable
+fable discover      # every conversation you ever had — unlocked, in seconds
+fable serve         # browse your memory in a dashboard
 ```
 
-No API key for any core feature. Nothing leaves your machine.
-Want to try it before indexing your own history? `python3 demo/seed_demo.py
-&& fable --db demo/demo.db serve` ships a fictional sample corpus.
+100% local · no API keys · no cloud · no daemons. Your conversations
+never leave your machine.
+
+- **Ask about past conversations with Claude — get the real answer.**
+  *"What did we decide about auth last month?"* Claude searches its own
+  history mid-session (via MCP) and quotes the **actual transcript** —
+  not a summary, not an extracted "fact." The conversation itself.
+- **The wall stops costing you.** fable catalogs everything before
+  compaction walls it off, and hands back exactly what Claude lost —
+  on demand, under a token budget you set.
+- **The 30-day deletion becomes irrelevant.** Sealed into a local vault,
+  byte-identical, for as long as you decide.
+
+## First of its kind — five things no other tool does
+
+🧵 **Composed Sessions.** Hand-pick conversations from *any* project, any
+month — put them in *your* order — and fable builds a brand-new session
+that Claude resumes as its own lived history. A workspace with curated
+memory. *(Empirically verified: restitched sessions resume cleanly,
+signatures intact.)*
+
+🕰️ **File time-travel.** Your transcripts accidentally versioned
+everything. fable reconstructs **every file's edit history** — every Edit
+and Write Claude ever made, across every session — with side-by-side
+comparison between any two moments of a file's life, and a jump back to
+the conversation that made each change. (`fable file src/loader.py`)
+
+✂️ **Transcript Surgery.** Your 80 MB session is paying rent on dead
+threads. Remove whole conversations — fable re-stitches the timeline,
+shows you the simulation first, and keeps every removed byte recallable
+forever. Reversible by construction.
+
+🪶 **Pruning that loses nothing.** Slim every message (tool noise, images,
+bloat) before resuming a heavy session — with an itemized preview of the
+savings, and the original sealed in the vault first.
+
+🔍 **Memory Diff.** See exactly what any prune or cleanup cost any
+conversation — generation by generation, byte by byte. Nobody else can
+even show you what was lost.
+
+## How it works (the short version)
+
+fable indexes your transcripts into a local SQLite archive: an immutable
+**vault** (every byte, forever) plus a **search map** (keyword + semantic,
+optional local embeddings via Ollama). Hooks run before Claude Code's
+compaction and cleanup; an MCP server gives Claude search / recall /
+remember tools. Measured on a real archive — 191,000 records, 6,000
+conversations:
+
+| recall@1 | recall@5 | search (p50) | full re-index |
+|:---:|:---:|:---:|:---:|
+| 76.7% | 90.0% | 135 ms | 6.6 s |
+
+Reproduce it: `python3 scripts/benchmark.py`. No competitor publishes
+retrieval numbers.
+
+## Why fable — and not another memory layer
+
+| | **fable** | claude-mem | mem0 / Letta | native Claude Code |
+|---|:---:|:---:|:---:|:---:|
+| Memory = your **actual conversations** | ✅ | ❌ summaries | ❌ fact snippets | ⚠️ locked behind the wall |
+| Survives the 30-day deletion & `/clear` | ✅ | ⚠️ its summaries do | ❌ | ❌ |
+| Claude searches its own history (MCP) | ✅ | ✅ | ❌ | ❌ |
+| Composed sessions / file time-travel / surgery / diff | ✅ first of its kind | ❌ | ❌ | ❌ |
+| Zero API keys, fully offline | ✅ | ✅ | ❌ | ✅ |
+| Footprint | one SQLite file | Node + Chroma daemon | cloud / Docker | — |
+
+(Fair is fair: mem0 fits multi-LLM production agents; ccusage goes deeper
+on billing analytics. Different jobs, both compatible with fable.)
+
+## Trusted the hard way
+
+fable's first user is the session that built it: mid-build, that session
+was pruned by fable (7.8 MB → 3.0 MB), kept working through compaction via
+its own hook, and is now searchable through its own MCP server — and
+`fable file fable/recall.py` replays its own source code being written,
+18 versions deep. The build history eats its own dogfood — all $83k of
+API-equivalent work in the author's archive included.
+
+**What people use it for**
+- *"Why did we choose X?"* — architecture archaeology, weeks later
+- *"When did this function break?"* — file time-travel to the exact edit
+  and the conversation around it
+- Picking up a debugging hunt exactly where the wall cut it off
+- A composed "workspace" session: threads from three projects, one memory
+- Slimming a heavy session before `--resume`, reversibly
+- `fable remember "we deploy Fridays only"` — standing rules, every session
+
+Try it on a fictional sample first:
+`python3 demo/seed_demo.py && fable --db demo/demo.db serve`
 
 | | |
 |---|---|
 | ![search](demo/shots/search.png) | ![dashboard](demo/shots/dashboard.png) |
 
-Your Claude Code sessions produce massive `.jsonl` transcripts. Compaction
-summarizes them (lossy); pruning slims them (lossy); the full history rots
-in backup files nobody can search. **fable** turns that history into a
-queryable memory: every record indexed at full fidelity, retrievable
-byte-identical, threads reconstructed exactly as they happened — and pages
-precise context back into a live session under a token budget.
+---
 
-```
-live session ──prune──▶ lean session + sealed backup generation
-     ▲                              │
-     │                          index (SQLite Map: copies, FTS5, terms, cards)
-     │                              │
-     └──fable thread X──── vault (immutable backup generations)
-```
-
-Zero dependencies: Python 3.9+ stdlib only (SQLite FTS5, urllib).
-
-## Quickstart
-
-```bash
-cd fable
-
-# index one session (vault generations + live transcript)
-./bin/fable --db fable.db index \
-    --vault /path/to/backups/<project>/<session-id> \
-    --live  ~/.claude/projects/<project>/<session-id>.jsonl
-
-# ...or index EVERY Claude Code project + all pruner backups at once
-./bin/fable --db fable.db discover
-
-# find context
-./bin/fable --db fable.db search zigzag pivot --operative decide
-./bin/fable --db fable.db thread <prompt_id> --budget 8000   # paste into session
-./bin/fable --db fable.db block <uuid>                        # one record, byte-identical
-
-# dashboard
-./bin/fable --db fable.db serve            # http://127.0.0.1:8765
-
-# prune a live session (transactional; never evicts unindexed bytes)
-./bin/fable --db fable.db prune <live.jsonl> --mode resume \
-    --backup-dir <backups>/<project> --replace --strip-images
-
-# LLM thread cards (semantic discovery layer) — pick your provider:
-./bin/fable --db fable.db cards run                              # OpenRouter (free Gemma; key in .env)
-./bin/fable --db fable.db cards run --provider ollama --model qwen2.5   # any local/fine-tuned model, fully offline
-./bin/fable --db fable.db cards run --provider claude-cli --model haiku # your Claude Max subscription
-./bin/fable --db fable.db cards run --provider anthropic --model haiku  # Anthropic API key
-```
-
-Run the tests: `python3 -m unittest discover -s tests` (101 tests).
-
-## How it answers the three hard problems
-
-**Indexing without seed keywords.** Topics are *extracted*, not predefined:
-FTS5 over all signal text (BM25), deterministic terms (closed-list
-operative verbs, regex targets — paths/crates/identifiers, TF-IDF noun
-phrases per thread), and LLM **thread cards** (title, type, topics,
-decisions, outcome) that act as a browsable table of contents. Cards are
-pointers, never replacements.
-
-**Retrieval by offsets.** Every copy of every record is in the `copies`
-table as `(file, byte_offset, byte_len)`. Retrieval is seek+read — ~50ms,
-no scan, byte-identical (verified by test). `records` holds the
-best-fidelity pointer; when a file is rewritten or deleted the pointer is
-recomputed from surviving copies, so a prune can never silently downgrade
-what memory holds.
-
-**Turn-based precision.** Threads are not heuristic: `promptId` exists only
-on user records (an empirical fact of real transcripts), so membership is
-resolved transitively up the `parentUuid` graph; sidechains attach via
-`sourceToolAssistantUUID`. Rendering preserves User → Assistant → Tool →
-Assistant order, flags abandoned edit-branches, and elides only bulky
-tool_results under the budget — with `[truncated — fable block <uuid>]`
-markers so nothing is ever more than one command from full fidelity.
-
-## The memory lifecycle (prune ↔ recall)
-
-- **Prune** (eviction): drops tool bloat / images / noise from the live
-  transcript so the session keeps running. Transactional protocol for
-  `--replace`: snapshot → mandatory backup → **index the backup** → gate
-  (every record must have an immutable full-fidelity copy in the index) →
-  atomic temp+fsync+rename, preserving any bytes the session appended
-  mid-prune. A crash leaves the live file untouched or fully replaced.
-- **Recall** (page-in): output is wrapped in a `<historical_context>`
-  sentinel. The indexer never indexes sentinel content (it records a
-  citation edge instead) and the pruner strips it down to a
-  `<consulted_arcs>` stub — recalled memory can never recursively swallow
-  itself (the "memory inception" guard).
-
-## CLI reference
-
-| command | purpose |
-|---|---|
-| `index --vault DIR --live FILE` | index one session's generations + live file |
-| `discover [--project X] [--no-vaults]` | find + index all projects/backups |
-| `search QUERY [--operative V] [--target T] [-n N] [--json]` | ranked threads |
-| `thread ID [--budget N] [--raw] [--no-sentinel]` | retrieve a thread |
-| `block UUID` | one record, byte-identical |
-| `cards run [--limit N] [--min-tokens N] [--dry-run]` / `cards show ID` | LLM cards |
-| `prune FILE --mode resume\|extract\|handoff [--replace] [--strip-images] [--force]` | evict |
-| `serve [--port N]` | dashboard |
-| `stats` | index counts |
-
-`--db` (or `FABLE_DB`) selects the index; read commands refuse to run
-without an existing index rather than silently creating an empty one.
-
-## Design decisions (and what was rejected)
-
-- **Original JSONL is the Vault; SQLite is the Map.** Rejected: copying
-  transcripts into XML arcs (dual source of truth, CDATA breaks on `]]>`),
-  and vector RAG over raw chunks (breaks turn boundaries, opaque, heavy).
-- **Offline deterministic extraction over live-agent wikilink tagging.**
-  The tagging protocol was measured to fail: 4 wikilinks in 31k records.
-  Anything that depends on the model remembering to write is not memory.
-  Wikilinks are still harvested as bonus terms if present.
-- **copies table over single best-pointer.** A pointer the prune lifecycle
-  can invalidate is not ground truth; recording all copies makes best-copy
-  recomputation trivial and the evict gate provable.
-- **Cards via cheap LLM (OpenRouter free Gemma), generated offline,
-  resumable, injection-hardened** (data-delimiter prompt, balanced-JSON
-  extraction, shape validation). 30 seed cards were generated by Claude
-  subagents (`source='claude-subagent'`); the full pass runs with
-  `fable cards run` once `OPENROUTER_API_KEY` lands in `.env`.
-
-## Numbers (real corpus: session 27ce47a8, 84MB live + 5 vault generations)
-
-- 139,892 record copies → 35,242 unique records, 1,895 threads, 0 parse errors
-- ~950 records recovered that no longer exist in the live transcript at all
-- index build: **6.6s** (was 4m55s before the FTS rowid fix), DB 65MB
-- search ~50ms; block retrieval byte-identical at ~44ms
-
-## Repository layout
-
-```
-fable/           package (jsonl, db, indexer, extract, terms, threads,
-                 recall, cards, openrouter, prune, discover, serve, cli)
-tests/           101 unittest tests, all synthetic fixtures
-reference/       copies of source material + real corpus (gitignored)
-docs/ARCHITECTURE.md          full design rationale
-docs/superpowers/plans/       implementation plan
-scripts/         strip_images.py, seed-cards.json
-```
-
-## Retrieval benchmark (real corpus, 191k records / 6k threads)
-
-Card titles used as queries (what a user types weeks later), expected
-thread must rank. `python3 scripts/benchmark.py`:
-
-| metric | value |
-|---|---|
-| recall@1 | 76.7% |
-| recall@5 | 90.0% |
-| latency p50 / p95 | 135ms / 337ms |
-
-## Stability & portability
-
-- JSON field names in `--json` / API output are frozen; additions only.
-- Windows: use `python -m fable …` (bin/fable is a sh wrapper); core is
-  pure stdlib. Known gaps: `claude-cli` provider and the launch scripts
-  are tested on macOS/Linux only.
-- Schema migrations are additive; the index is always rebuildable from
-  the vault (`fable discover`).
+MIT · local-first forever ([non-goals](ROADMAP.md)) · built with Claude
+Code, for Claude Code · `@claude` answers issues here — [the butler is
+Claude](https://github.com/grooverLab/fable/issues/1) ·
+[architecture deep-dive](docs/ARCHITECTURE.md) ·
+[![Star History Chart](https://api.star-history.com/svg?repos=grooverLab/fable&type=Date)](https://star-history.com/#grooverLab/fable)

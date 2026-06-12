@@ -494,6 +494,42 @@ def api_dashboard(db_path, params):
             "health": health}
 
 
+def api_files(db_path, params):
+    from fable.filetime import known_files
+    q = (params.get("q") or [""])[0]
+    return known_files(db_path, q)
+
+
+def api_filehist(db_path, params):
+    from fable.filetime import file_events, reconstruct
+    path = (params.get("path") or [""])[0]
+    versions = reconstruct(file_events(db_path, path))
+    return {"path": path, "versions": [
+        {k: v[k] for k in ("uuid", "ts", "tool", "ok", "note", "bytes",
+                           "session_id", "prompt_id")}
+        for v in versions]}
+
+
+def api_filediff(db_path, params):
+    from fable.filetime import file_events, reconstruct, file_diff
+    path = (params.get("path") or [""])[0]
+    a = int((params.get("a") or ["0"])[0])
+    b = int((params.get("b") or ["0"])[0])
+    versions = reconstruct(file_events(db_path, path))
+    return {"path": path, "a": a, "b": b,
+            "diff": file_diff(versions, a, b)}
+
+
+def api_fileversion(db_path, params):
+    from fable.filetime import file_events, reconstruct
+    path = (params.get("path") or [""])[0]
+    i = int((params.get("i") or ["0"])[0])
+    versions = reconstruct(file_events(db_path, path))
+    v = versions[i]
+    return {"i": i, "content": v["content"], "ok": v["ok"],
+            "note": v["note"], "ts": v["ts"], "tool": v["tool"]}
+
+
 def api_export(db_path, params):
     from fable.export import export_thread_md, export_thread_html
     prompt_id = (params.get("id") or [""])[0]
@@ -730,6 +766,10 @@ ROUTES["/api/settings"] = api_settings
 ROUTES["/api/costs"] = api_costs
 ROUTES["/api/dashboard"] = api_dashboard
 ROUTES["/api/export"] = api_export
+ROUTES["/api/files"] = api_files
+ROUTES["/api/filehist"] = api_filehist
+ROUTES["/api/filediff"] = api_filediff
+ROUTES["/api/fileversion"] = api_fileversion
 ROUTES["/api/facts"] = api_facts
 
 def post_prune_plan(db_path, body):

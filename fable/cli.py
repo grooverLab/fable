@@ -189,6 +189,16 @@ def build_parser():
                    help="index database path (env FABLE_DB, default fable.db)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    p_file = sub.add_parser(
+        "file", help="file time-travel: edit history from the archive")
+    p_file.add_argument("path", help="file path (or unique suffix)")
+    p_file.add_argument("--show", type=int, default=None,
+                        help="print version N's full content")
+    p_file.add_argument("--diff", type=int, nargs=2, metavar=("A", "B"),
+                        help="unified diff between versions A and B")
+    p_file.set_defaults(fn=lambda a: __import__(
+        "fable.filetime", fromlist=["cmd_file"]).cmd_file(a))
+
     sp = sub.add_parser("index", help="index vault generations + live file")
     sp.add_argument("--vault", nargs="*", default=[],
                     help="vault files or directories of *.jsonl generations")

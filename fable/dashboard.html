@@ -366,6 +366,7 @@ button.danger:hover{background:#ff8557}
       <div class="tab" data-tab="compose">⊞ Compose<span class="tabbadge" id="bk-count" style="display:none"></span></div>
       <div class="tab" data-tab="graph">Graph</div>
       <div class="tab" data-tab="surgery">Surgery</div>
+      <div class="tab" data-tab="files">Files</div>
       <div class="tab" data-tab="cards">Cards</div>
       <div class="tab" data-tab="costs">Dashboard</div>
       <div class="tab" data-tab="settings">Settings</div>
@@ -460,6 +461,15 @@ button.danger:hover{background:#ff8557}
       <div id="s-list"><div class="empty">pick a session with a live transcript and hit analyze</div></div>
     </section>
 
+    <section id="view-files" style="display:none">
+      <div class="searchrow">
+        <input type="text" id="ft-q" placeholder="file path… (loader.py, src/checkout, recall)" style="flex:1;min-width:280px">
+        <button onclick="ftSearch()">HISTORY</button>
+        <i class="info" data-tip="File time-travel: your transcripts accidentally version every file Claude ever edited — the full before/after of every Edit and Write, across every session. Pick a file, see its evolution, put any two versions side by side."></i>
+      </div>
+      <div class="hint">every edit Claude ever made, reconstructed from the archive · ○ versions had their inputs pruned away (the chain resumes at the next full Write)</div>
+      <div id="ft-out"><div class="empty"><span class="big">&ldquo;Every file has a story.&rdquo;</span>type a path to read it</div></div>
+    </section>
     <section id="view-cards" style="display:none"><div class="loading">loading cards…</div></section>
 
     <section id="view-costs" style="display:none"><div class="loading">computing telemetry…</div></section>
@@ -500,7 +510,7 @@ function showTab(name){
   if(name!=="costs")dtip.hide&&dtip.hide();
   activeTab=name;
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
-  for(const v of ["search","thread","compose","graph","surgery","cards","costs","settings","stats"])
+  for(const v of ["search","thread","compose","graph","surgery","files","cards","costs","settings","stats"])
     $("#view-"+v).style.display="none";
   $("#view-"+(name==="search"&&currentThread==="open"?"thread":name)).style.display="";
   if(name==="compose")renderLoom();
@@ -1336,6 +1346,85 @@ function drawProj(byProject,active){
       .attr("fill","#cdd6e4").style("font-size","10px").text("$"+fmt(v));
   });
 }
+
+/* ── file time-travel ── */
+let FT_PATH=null,FT_VERS=[];
+async function ftSearch(){
+  const q=$("#ft-q").value.trim();if(!q)return;
+  $("#ft-out").innerHTML='<div class="loading">searching the archive…</div>';
+  const files=await api("/api/files",{q});
+  if(!files.length){$("#ft-out").innerHTML='<div class="empty">no edited files match — try a shorter fragment</div>';return}
+  $("#ft-out").innerHTML='<div class="results">'+files.map(f=>
+    `<div class="hit" onclick="ftHist('${esc(f.path)}')"><span class="title" style="font-size:13px">${esc(f.path)}</span><div class="row2"><span>${f.mentions} mentions in the archive</span></div></div>`).join("")+"</div>";
+}
+function ftSpark(vers){
+  const pts=vers.map(v=>v.bytes).map(b=>b==null?0:b);
+  const W=160,H=28,mx=Math.max(...pts,1);
+  const step=W/Math.max(pts.length-1,1);
+  const d=pts.map((p,i)=>`${i?"L":"M"}${(i*step).toFixed(1)},${(H-2-(H-6)*p/mx).toFixed(1)}`).join(" ");
+  return `<svg width="${W}" height="${H}" style="vertical-align:middle"><path d="${d}" fill="none" stroke="var(--phos)" stroke-width="1.5"/></svg>`;
+}
+async function ftHist(path){
+  FT_PATH=path;
+  $("#ft-out").innerHTML='<div class="loading">replaying every edit…</div>';
+  const h=await api("/api/filehist",{path});
+  FT_VERS=h.versions;
+  if(!FT_VERS.length){$("#ft-out").innerHTML='<div class="empty">no Edit/Write history for this exact path</div>';return}
+  // analytics
+  const sess=new Set(FT_VERS.map(v=>v.session_id)),writes=FT_VERS.filter(v=>v.tool==="Write").length;
+  let churn=0;for(let i=1;i<FT_VERS.length;i++){const a=FT_VERS[i-1].bytes,b=FT_VERS[i].bytes;if(a!=null&&b!=null)churn+=Math.abs(b-a)}
+  const span=`${(FT_VERS[0].ts||"?").slice(0,10)} → ${(FT_VERS[FT_VERS.length-1].ts||"?").slice(0,10)}`;
+  const opts=FT_VERS.map((v,i)=>`<option value="${i}" ${v.ok?"":"disabled"}>v${i}${v.ok?"":" ○"} · ${(v.ts||"?").slice(5,16)} · ${v.tool}</option>`).join("");
+  $("#ft-out").innerHTML=`
+    <div class="genwrap" style="margin-bottom:12px">
+      <b style="color:var(--phos)">${esc(path)}</b>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:11.5px;color:var(--dim);align-items:center">
+        <span><b style="color:var(--phos)">${FT_VERS.length}</b> versions</span>
+        <span><b style="color:var(--phos)">${writes}</b> writes</span>
+        <span><b style="color:var(--phos)">${sess.size}</b> session${sess.size>1?"s":""}</span>
+        <span>churn <b style="color:var(--phos)">${fmt(churn)}B</b></span>
+        <span>${span}</span>
+        <span title="file size across versions">${ftSpark(FT_VERS)}</span>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:10px;align-items:center;flex-wrap:wrap">
+        <select id="ft-a" class="facet" style="width:auto">${opts}</select> ⇄
+        <select id="ft-b" class="facet" style="width:auto">${opts}</select>
+        <button onclick="ftPanes()">SIDE BY SIDE</button>
+        <button class="ghost" onclick="ftDiff()">unified diff</button>
+      </div>
+    </div>
+    <div id="ft-panes"></div>
+    <div class="results" style="margin-top:12px">`+FT_VERS.map((v,i)=>`
+      <div class="hit" style="padding:8px 14px">
+        <span style="color:${v.ok?"var(--green)":"var(--ember)"}">v${i} ${v.ok?"●":"○"}</span>
+        <span style="color:var(--dim);font-size:11.5px"> ${(v.ts||"?").slice(0,19)} · ${v.tool} · ${v.bytes!=null?fmt(v.bytes)+"B":"—"} · session ${(v.session_id||"?").slice(0,8)}${v.note?" · "+esc(v.note):""}</span>
+        <span class="bf-btn" style="float:right" onclick="event.stopPropagation();openThread('${esc(v.prompt_id)}')" title="open the conversation that made this edit">↪ thread</span>
+      </div>`).join("")+"</div>";
+  const last=FT_VERS.map((v,i)=>v.ok?i:-1).filter(i=>i>=0);
+  if(last.length){$("#ft-a").value=String(last[0]);$("#ft-b").value=String(last[last.length-1])}
+}
+async function ftPanes(){
+  const a=$("#ft-a").value,b=$("#ft-b").value;
+  $("#ft-panes").innerHTML='<div class="loading">reconstructing both versions…</div>';
+  const [va,vb]=await Promise.all([api("/api/fileversion",{path:FT_PATH,i:a}),
+                                   api("/api/fileversion",{path:FT_PATH,i:b})]);
+  const pane=(v,i)=>`<div class="genwrap" style="min-width:0">
+      <b style="color:var(--cyan)">v${i}</b> <span class="hint">${(v.ts||"?").slice(0,19)} · ${v.tool}</span>
+      <pre class="thread" style="max-height:55vh;margin-top:8px;font-size:11px">${v.content==null?'<span style="color:var(--ember)">not reconstructable — '+esc(v.note||"inputs pruned")+'</span>':esc(v.content)}</pre></div>`;
+  $("#ft-panes").innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">${pane(va,a)}${pane(vb,b)}</div>`;
+}
+async function ftDiff(){
+  const a=$("#ft-a").value,b=$("#ft-b").value;
+  const r=await api("/api/filediff",{path:FT_PATH,a,b});
+  if(r.error){openModal("diff failed","",`<div class="warnbox" style="margin:0">${esc(r.error)}</div>`);return}
+  const body=r.diff.map(l=>{
+    const cls=l.startsWith("+")?"color:var(--green)":l.startsWith("-")?"color:var(--red)":l.startsWith("@@")?"color:var(--cyan)":"color:var(--dim)";
+    return `<div style="${cls};white-space:pre-wrap;word-break:break-all">${esc(l)}</div>`}).join("");
+  openModal(`${FT_PATH.split("/").pop()} · v${a} → v${b}`,
+    "what changed between these two moments of the file's life",
+    `<div style="font-size:11.5px;max-height:60vh;overflow-y:auto">${body||'<span class="hint">byte-identical</span>'}</div>`);
+}
+$("#ft-q").addEventListener("keydown",e=>{if(e.key==="Enter")ftSearch()});
 
 /* ── export ── */
 async function exportThread(id,fmt){
