@@ -820,6 +820,30 @@ POST_ROUTES = {
 }
 
 
+def _heal_stale(db_path, exc) -> bool:
+    """A live transcript that grew since indexing is the normal state of
+    the CURRENT session — re-index just that file and let the caller
+    retry, instead of surfacing an error the user must fix by hand."""
+    path = getattr(exc, "path", None)
+    if not path or not os.path.exists(path):
+        return False
+    conn = fdb.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT immutable FROM files WHERE path = ?", (path,)).fetchone()
+    finally:
+        conn.close()
+    if row and row[0]:
+        return False  # immutable vault files should never drift — real error
+    try:
+        from fable.extract import fts_extract_fn
+        from fable.indexer import index_vault
+        index_vault(db_path, [], live_file=path, extract_fn=fts_extract_fn)
+        return True
+    except Exception:
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
     db_path = "fable.db"
 
@@ -837,8 +861,15 @@ class Handler(BaseHTTPRequestHandler):
         if fn is None:
             self._send(404, b'{"error":"not found"}', "application/json")
             return
+        from fable.recall import StaleIndexError
         try:
-            payload = fn(self.db_path, parse_qs(parsed.query))
+            try:
+                payload = fn(self.db_path, parse_qs(parsed.query))
+            except StaleIndexError as e:
+                # live transcripts grow constantly — re-index and retry once
+                if not _heal_stale(self.db_path, e):
+                    raise
+                payload = fn(self.db_path, parse_qs(parsed.query))
             self._send(200, json.dumps(payload).encode(),
                        "application/json")
         except (KeyError, ValueError, FileNotFoundError, RuntimeError) as e:

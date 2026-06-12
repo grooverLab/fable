@@ -121,3 +121,40 @@ class TestOrphanedVaultDiscovery(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStaleSelfHeal(unittest.TestCase):
+    """A live transcript that grew after indexing must self-heal in the
+    dashboard: re-index that file and retry, not surface an error."""
+
+    def test_heal_stale_reindexes_live_file(self):
+        import json as _json
+        from fable.extract import fts_extract_fn
+        from fable.indexer import index_vault
+        from fable.recall import render_thread, StaleIndexError
+        from fable.serve import _heal_stale
+        from tests.helpers import rec, write_jsonl
+        d = tempfile.mkdtemp()
+        try:
+            db = os.path.join(d, "f.db")
+            live = write_jsonl(os.path.join(d, "live.jsonl"), [
+                rec("a", "p1", None, "user", "2026-06-01T00:00:01Z",
+                    text="hello world")])
+            index_vault(db, [], live_file=live, extract_fn=fts_extract_fn)
+            # the session keeps talking: live file grows after indexing
+            with open(live, "a") as f:
+                f.write(_json.dumps(
+                    rec("b", None, "a", "assistant",
+                        "2026-06-01T00:00:02Z", text="reply")) + "\n")
+            try:
+                render_thread(db, "p1", sentinel=False)
+                self.fail("expected StaleIndexError")
+            except StaleIndexError as e:
+                self.assertTrue(_heal_stale(db, e))
+            out = render_thread(db, "p1", sentinel=False)
+            self.assertIn("hello world", out)
+            self.assertIn("reply", out)   # the appended turn is now indexed
+
+    # immutable vault files must NOT self-heal — drift there is a real error
+        finally:
+            shutil.rmtree(d)

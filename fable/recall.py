@@ -32,12 +32,16 @@ def _check_fresh(conn, paths) -> None:
         try:
             st = os.stat(path)
         except OSError:
-            raise StaleIndexError(
+            err = StaleIndexError(
                 f"indexed file is gone: {path} — re-run `fable index`")
+            err.path = path
+            raise err
         if row and (row[0] != st.st_size or abs(row[1] - st.st_mtime) > 1e-6):
-            raise StaleIndexError(
+            err = StaleIndexError(
                 f"{path} changed since it was indexed — re-run "
                 f"`fable index`/`fable discover` before recalling from it")
+            err.path = path
+            raise err
 
 
 def get_block(db_path: str, uuid: str) -> str:
