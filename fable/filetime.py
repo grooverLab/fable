@@ -47,6 +47,7 @@ def file_events(db_path: str, path_query: str) -> List[dict]:
         if not uuids:
             return []
         events = []
+        reads = {}
         CHUNK = 500
         for i in range(0, len(uuids), CHUNK):
             chunk = uuids[i:i + CHUNK]
@@ -70,8 +71,7 @@ def file_events(db_path: str, path_query: str) -> List[dict]:
                     continue
                 for block in content:
                     if not (isinstance(block, dict)
-                            and block.get("type") == "tool_use"
-                            and block.get("name") in EDIT_TOOLS):
+                            and block.get("type") == "tool_use"):
                         continue
                     inp = block.get("input")
                     if not isinstance(inp, dict):
@@ -81,12 +81,98 @@ def file_events(db_path: str, path_query: str) -> List[dict]:
                             or target.endswith("/" + path_query.lstrip("/"))
                             or target.endswith(path_query)):
                         continue
-                    events.append(_event(block["name"], inp, target, uuid,
-                                         ts, ts_epoch, prompt_id, session_id))
+                    name = block.get("name")
+                    if name in EDIT_TOOLS:
+                        events.append(_event(name, inp, target, uuid,
+                                             ts, ts_epoch, prompt_id,
+                                             session_id))
+                    elif (name == "Read" and not inp.get("offset")
+                          and not inp.get("limit")):
+                        # full-file Read: its result is a ground-truth
+                        # snapshot we can re-anchor the chain on
+                        reads[uuid] = {"tool": "Read", "file_path": target,
+                                       "uuid": uuid, "ts": ts,
+                                       "ts_epoch": ts_epoch,
+                                       "prompt_id": prompt_id,
+                                       "session_id": session_id,
+                                       "tool_id": block.get("id"),
+                                       "ok": False, "note": ""}
+        if reads:
+            ph = ",".join("?" * len(reads))
+            rrows = conn.execute(f"""
+                SELECT r.parent_uuid, f.path, r.offset, r.length
+                FROM records r JOIN files f ON f.id = r.file_id
+                WHERE r.parent_uuid IN ({ph})""",
+                list(reads)).fetchall()
+            for parent, fpath, offset, length in rrows:
+                ev = reads.get(parent)
+                if ev is None or ev.get("content") is not None:
+                    continue
+                try:
+                    obj = json.loads(read_span(fpath, offset, length)
+                                     .decode("utf-8", "surrogateescape"))
+                except (OSError, ValueError):
+                    continue
+                msg = obj.get("message")
+                blocks = (msg.get("content")
+                          if isinstance(msg, dict) else None)
+                if not isinstance(blocks, list):
+                    continue
+                for b in blocks:
+                    if (isinstance(b, dict)
+                            and b.get("type") == "tool_result"
+                            and b.get("tool_use_id") == ev["tool_id"]):
+                        inner = b.get("content")
+                        texts = []
+                        if isinstance(inner, str):
+                            texts = [inner]
+                        elif isinstance(inner, list):
+                            texts = [x.get("text", "") for x in inner
+                                     if isinstance(x, dict)
+                                     and x.get("type") == "text"]
+                        snap = _parse_read_snapshot(
+                            "\n".join(texts)) if texts else None
+                        if snap is not None:
+                            ev["content"], ev["ok"] = snap, True
+            events.extend(ev for ev in reads.values() if ev.get("ok"))
         events.sort(key=lambda e: (e["ts_epoch"] or 0, e["uuid"]))
         return events
     finally:
         conn.close()
+
+
+_NUMBERED = None
+
+
+def _parse_read_snapshot(text):
+    """Claude Code Read results carry the file as numbered lines
+    ('     1\tcontent' or '  1→content'). Returns the file content if the
+    result is a complete-from-line-1 snapshot, else None."""
+    import re
+    global _NUMBERED
+    if _NUMBERED is None:
+        _NUMBERED = re.compile(r"^\s*(\d+)(?:\t|→)(.*)$")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    lines = text.split("\n")
+    out, expect = [], 1
+    matched = 0
+    for ln in lines:
+        m = _NUMBERED.match(ln)
+        if not m:
+            if not ln.strip():
+                continue
+            if matched > 3:
+                break  # trailing notices after the snapshot
+            return None
+        if int(m.group(1)) != expect:
+            return None
+        out.append(m.group(2))
+        expect += 1
+        matched += 1
+    if matched >= 2000:
+        return None  # Read truncates at 2000 lines — partial, never anchor
+    return "\n".join(out) + "\n" if matched else None
 
 
 def _event(tool, inp, target, uuid, ts, ts_epoch, prompt_id, session_id):
@@ -115,16 +201,51 @@ def _event(tool, inp, target, uuid, ts, ts_epoch, prompt_id, session_id):
     return ev
 
 
+def _invert(ev, after):
+    """State BEFORE an Edit, derived from the state after it. Returns None
+    when inversion is ambiguous (deletions, replace_all, missing strings)."""
+    if ev.get("replace_all"):
+        return None
+    if ev["tool"] == "MultiEdit":
+        cur = after
+        for e in reversed(ev.get("edits") or []):
+            old, new = e.get("old_string", ""), e.get("new_string", "")
+            if not old or not new or new not in cur:
+                return None
+            cur = cur.replace(new, old, 1)
+        return cur
+    old, new = ev.get("old"), ev.get("new")
+    if not old or not new or new not in (after or ""):
+        return None
+    return after.replace(new, old, 1)
+
+
 def reconstruct(events: List[dict]) -> List[dict]:
-    """Replay events into file versions. content=None where the chain is
-    broken (lost inputs or failed apply) until the next full Write."""
+    """Replay events into file versions — bidirectionally.
+
+    Forward pass: exact states wherever the chain is intact. Backward pass:
+    a broken stretch is rebuilt from the NEXT anchor by inverting edits
+    (their before/after strings are recorded verbatim), marked derived.
+    Only stretches that end at a Write stay unknown — a Write's prior
+    state is genuinely unrelated to its content."""
     versions = []
+    evlist = []
     current: Optional[str] = None
     for ev in events:
         v = {"uuid": ev["uuid"], "ts": ev["ts"], "tool": ev["tool"],
              "session_id": ev["session_id"], "prompt_id": ev["prompt_id"],
              "ok": True, "note": ev.get("note", "")}
-        if ev["tool"] == "Write":
+        if ev["tool"] == "Read":
+            snap = ev.get("content")
+            if snap is None:
+                continue
+            if current is not None and current == snap:
+                continue  # checkpoint agrees — no new version
+            v["note"] = ("re-anchored from Read snapshot"
+                         if current is None else
+                         "re-anchored — out-of-band changes detected")
+            current = snap
+        elif ev["tool"] == "Write":
             current = ev.get("content")
             v["ok"] = current is not None
         elif not ev.get("ok") or current is None:
@@ -155,6 +276,31 @@ def reconstruct(events: List[dict]) -> List[dict]:
         v["content"] = current
         v["bytes"] = len(current.encode()) if current is not None else None
         versions.append(v)
+        evlist.append(ev)
+
+    # ── backward pass: rebuild broken stretches from the next anchor ──
+    for i in range(len(versions) - 1, 0, -1):
+        cur, prev = versions[i], versions[i - 1]
+        if prev["content"] is not None or cur["content"] is None:
+            continue
+        ev = evlist[i]
+        if ev["tool"] == "Write":
+            continue  # hard barrier: state before a Write is unknowable
+        if ev["tool"] == "Read":
+            # the snapshot is the state just before the Read too (reads
+            # don't modify) — derived, since another out-of-band change
+            # could sit in between
+            before = cur["content"]
+        else:
+            before = _invert(ev, cur["content"])
+        if before is None:
+            continue
+        prev["content"] = before
+        prev["bytes"] = len(before.encode())
+        prev["ok"] = True
+        prev["derived"] = True
+        prev["note"] = ((prev["note"] + " · ") if prev["note"] else "") + \
+            f"rebuilt backward from v{i}"
     return versions
 
 
@@ -163,10 +309,11 @@ def file_diff(versions: List[dict], a: int, b: int) -> List[str]:
     if va["content"] is None or vb["content"] is None:
         raise ValueError("one of the selected versions is not "
                          "reconstructable (inputs lost or chain broken)")
+    tag = lambda v, i: (f"v{i} {v['ts'] or ''} ({v['tool']}"
+                        + (", derived" if v.get("derived") else "") + ")")
     return list(difflib.unified_diff(
         va["content"].splitlines(), vb["content"].splitlines(),
-        fromfile=f"v{a} {va['ts'] or ''} ({va['tool']})",
-        tofile=f"v{b} {vb['ts'] or ''} ({vb['tool']})", lineterm=""))
+        fromfile=tag(va, a), tofile=tag(vb, b), lineterm=""))
 
 
 def known_files(db_path: str, query: str = "", limit: int = 40) -> List[dict]:

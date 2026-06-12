@@ -467,7 +467,7 @@ button.danger:hover{background:#ff8557}
         <button onclick="ftSearch()">HISTORY</button>
         <i class="info" data-tip="File time-travel: your transcripts accidentally version every file Claude ever edited — the full before/after of every Edit and Write, across every session. Pick a file, see its evolution, put any two versions side by side."></i>
       </div>
-      <div class="hint">every edit Claude ever made, reconstructed from the archive · ○ versions had their inputs pruned away (the chain resumes at the next full Write)</div>
+      <div class="hint">every edit Claude ever made, reconstructed from the archive · ● exact replay · ◐ rebuilt backward from the next snapshot (models edit via sed/scripts too — fable inverts the recorded edits to recover) · ○ unknowable until the next Write</div>
       <div id="ft-out"><div class="empty"><span class="big">&ldquo;Every file has a story.&rdquo;</span>type a path to read it</div></div>
     </section>
     <section id="view-cards" style="display:none"><div class="loading">loading cards…</div></section>
@@ -1401,7 +1401,7 @@ async function ftHist(path){
   const sess=new Set(FT_VERS.map(v=>v.session_id)),writes=FT_VERS.filter(v=>v.tool==="Write").length;
   let churn=0;for(let i=1;i<FT_VERS.length;i++){const a=FT_VERS[i-1].bytes,b=FT_VERS[i].bytes;if(a!=null&&b!=null)churn+=Math.abs(b-a)}
   const span=`${(FT_VERS[0].ts||"?").slice(0,10)} → ${(FT_VERS[FT_VERS.length-1].ts||"?").slice(0,10)}`;
-  const opts=FT_VERS.map((v,i)=>`<option value="${i}" ${v.ok?"":"disabled"}>v${i}${v.ok?"":" ○"} · ${(v.ts||"?").slice(5,16)} · ${v.tool}</option>`).join("");
+  const opts=FT_VERS.map((v,i)=>`<option value="${i}" ${v.ok?"":"disabled"}>v${i}${v.ok?(v.derived?" ◐":""):" ○"} · ${(v.ts||"?").slice(5,16)} · ${v.tool}</option>`).join("");
   $("#ft-out").innerHTML=`
     <div class="genwrap" style="margin-bottom:12px">
       <b style="color:var(--phos)">${esc(path)}</b>
@@ -1423,7 +1423,7 @@ async function ftHist(path){
     <div id="ft-panes"></div>
     <div class="results" style="margin-top:12px">`+FT_VERS.map((v,i)=>`
       <div class="hit" style="padding:8px 14px">
-        <span style="color:${v.ok?"var(--green)":"var(--ember)"}">v${i} ${v.ok?"●":"○"}</span>
+        <span style="color:${v.ok?(v.derived?"var(--cyan)":"var(--green)"):"var(--ember)"}">v${i} ${v.ok?(v.derived?"◐":"●"):"○"}</span>
         <span style="color:var(--dim);font-size:11.5px"> ${(v.ts||"?").slice(0,19)} · ${v.tool} · ${v.bytes!=null?fmt(v.bytes)+"B":"—"} · session ${(v.session_id||"?").slice(0,8)}${v.note?" · "+esc(v.note):""}</span>
         <span class="bf-btn" style="float:right" onclick="event.stopPropagation();openThread('${esc(v.prompt_id)}')" title="open the conversation that made this edit">↪ thread</span>
       </div>`).join("")+"</div>";

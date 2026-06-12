@@ -11,7 +11,7 @@ Direction, not promises. Open a Discussion to influence priority.
 - Daily cost time-series JSON (#4)
 - `examples/` — real workflow walkthroughs (recall, compose, surgery)
 - Official MCP Registry listing
-- File time-travel: SHIPPED 2026-06-13 (`fable file <path>`, Files tab)
+- File time-travel: SHIPPED 2026-06-13 — bidirectional (backward derivation from snapshots)\n- Heredoc mining: treat `cat > f <<EOF` Bash inputs as Write-anchors (recovers sed/script-heavy stretches) (`fable file <path>`, Files tab)
 - Post-compaction healing v2: inject the diff of what compaction dropped
 
 ## Later

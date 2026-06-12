@@ -101,3 +101,62 @@ class TestFileTime(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReadReanchoring(unittest.TestCase):
+    """Models edit files outside the Edit tool (sed, heredocs). A full-file
+    Read snapshot in the transcript re-anchors the broken chain."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.dbpath = os.path.join(self.dir, "fable.db")
+        objs = [rec("w0", "p1", None, "user", "2026-05-01T10:00:00Z",
+                    text="work on app.py")]
+        objs.append(_b(rec("b0", None, "w0", "assistant",
+                           "2026-05-01T10:01:00Z"), [tool_use_block(
+                        "t0", "Write", {"file_path": "/repo/app.py",
+                                        "content": "A\nB\n"})]))
+        # out-of-band change happens here (sed) — no transcript event.
+        # next Edit expects text the reconstruction doesn't have:
+        objs.append(_b(rec("b1", None, "b0", "assistant",
+                           "2026-05-01T10:02:00Z"), [tool_use_block(
+                        "t1", "Edit", {"file_path": "/repo/app.py",
+                                       "old_string": "B-SEDDED",
+                                       "new_string": "C"})]))
+        # Claude Reads the file (full, numbered) — ground truth returns
+        objs.append(_b(rec("b2", None, "b1", "assistant",
+                           "2026-05-01T10:03:00Z"), [tool_use_block(
+                        "t2", "Read", {"file_path": "/repo/app.py"})]))
+        objs.append(rec("u2", "p1", "b2", "user", "2026-05-01T10:03:30Z",
+                        extra={"message": {"role": "user", "content": [
+                            {"type": "tool_result", "tool_use_id": "t2",
+                             "content": "     1\tA\n     2\tC-SEDDED\n"}]}}))
+        # an Edit that applies cleanly to the snapshot
+        objs.append(_b(rec("b3", None, "u2", "assistant",
+                           "2026-05-01T10:04:00Z"), [tool_use_block(
+                        "t3", "Edit", {"file_path": "/repo/app.py",
+                                       "old_string": "C-SEDDED",
+                                       "new_string": "D"})]))
+        live = write_jsonl(os.path.join(self.dir, "live.jsonl"), objs)
+        index_vault(self.dbpath, [], live_file=live,
+                    extract_fn=fts_extract_fn, project="t")
+        index_terms(self.dbpath)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def test_chain_recovers_at_read_snapshot(self):
+        versions = reconstruct(file_events(self.dbpath, "app.py"))
+        tools = [v["tool"] for v in versions]
+        self.assertEqual(tools, ["Write", "Edit", "Read", "Edit"])
+        # the divergent edit is no longer blind: rebuilt backward from
+        # the Read snapshot, flagged as derived (cyan ◐, not red ○)
+        self.assertTrue(versions[1]["ok"])
+        self.assertTrue(versions[1].get("derived"))
+        self.assertIn("rebuilt backward", versions[1]["note"])
+        self.assertEqual(versions[1]["content"], "A\nC-SEDDED\n")
+        self.assertTrue(versions[2]["ok"])             # re-anchored
+        self.assertIn("re-anchored", versions[2]["note"])
+        self.assertEqual(versions[2]["content"], "A\nC-SEDDED\n")
+        self.assertTrue(versions[3]["ok"])             # chain healthy again
+        self.assertIn("D", versions[3]["content"])

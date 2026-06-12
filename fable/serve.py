@@ -505,8 +505,9 @@ def api_filehist(db_path, params):
     path = (params.get("path") or [""])[0]
     versions = reconstruct(file_events(db_path, path))
     return {"path": path, "versions": [
-        {k: v[k] for k in ("uuid", "ts", "tool", "ok", "note", "bytes",
-                           "session_id", "prompt_id")}
+        {**{k: v[k] for k in ("uuid", "ts", "tool", "ok", "note",
+                              "bytes", "session_id", "prompt_id")},
+         "derived": bool(v.get("derived"))}
         for v in versions]}
 
 
