@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+reference/
+.DS_Store
+1.env
+*.log
+/tmp/
+build/
+*.egg-info/
