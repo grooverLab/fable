@@ -50,8 +50,9 @@ def cmd_index(args):
             "INSERT OR REPLACE INTO sessions(session_id, project, title,"
             " live_path, indexed_at) VALUES(?,?,?,?,?)",
             (stats["session_id"],
-             os.path.basename(os.path.dirname(os.path.abspath(args.live)))
-             if args.live else "manual",
+             __import__("fable.discover", fromlist=["project_label"])
+             .project_label(os.path.basename(os.path.dirname(
+                 os.path.abspath(args.live)))) if args.live else "manual",
              session_title(args.live) if args.live else None,
              args.live,
              datetime.datetime.now(datetime.timezone.utc).isoformat()))

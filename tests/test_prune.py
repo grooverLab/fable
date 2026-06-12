@@ -53,7 +53,8 @@ class TestPruneCore(PruneBase):
                             output=out)
         objs = load_jsonl(out)
         self.assertEqual(objs[0]["type"], "custom-title")
-        self.assertFalse(any(o.get("type") == "file-history-snapshot"
+        # file-history-snapshots are now KEPT (time-travel anchors)
+        self.assertTrue(any(o.get("type") == "file-history-snapshot"
                              for o in objs))
         by_uuid = {o.get("uuid"): o for o in objs if o.get("uuid")}
         # tool_use kept meaningful fields, dropped the rest

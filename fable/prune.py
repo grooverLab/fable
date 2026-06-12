@@ -20,8 +20,10 @@ from pathlib import Path
 from fable.extract import replace_historical
 from fable.jsonl import iter_records
 
-DROP_TYPES = {"progress", "file-history-snapshot", "queue-operation",
+DROP_TYPES = {"progress", "queue-operation",
               "last-prompt", "ai-title"}
+# NOTE: file-history-snapshot records are deliberately KEPT — 250-byte
+# pointers to full on-disk file backups; fable's time-travel anchors.
 DROP_SUBTYPES = {"turn_duration", "stop_hook_summary", "api_error"}
 METADATA_TYPES = {"custom-title", "agent-name", "mode", "permission-mode"}
 KEEP_INPUT_FIELDS = {"file_path", "path", "command", "description",

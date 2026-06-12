@@ -38,6 +38,103 @@ def _fts_candidates(conn, path_query: str) -> List[str]:
     return [r[0] for r in rows]
 
 
+def _history_dir():
+    import os
+    return (os.environ.get("FABLE_FILE_HISTORY")
+            or os.path.expanduser("~/.claude/file-history"))
+
+
+def _checkpoint_events(path_query: str) -> List[dict]:
+    """fable's own PostToolUse checkpoints: files snapshotted the moment a
+    Bash command mutated them (the gap no transcript record covers)."""
+    import glob
+    import os
+    from fable.indexer import parse_ts
+    base = (os.environ.get("FABLE_CHECKPOINTS")
+            or os.path.expanduser("~/.fable/checkpoints"))
+    events = []
+    for log in glob.glob(os.path.join(base, "*", "checkpoints.jsonl")):
+        session = os.path.basename(os.path.dirname(log))
+        try:
+            with open(log) as fh:
+                lines = fh.readlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            target = e.get("path") or ""
+            if not (target == path_query
+                    or target.endswith("/" + path_query.lstrip("/"))
+                    or target.endswith(path_query)):
+                continue
+            bpath = os.path.join(os.path.dirname(log), e.get("file") or "")
+            if not os.path.exists(bpath):
+                continue
+            try:
+                with open(bpath, "r", errors="surrogateescape") as fh:
+                    content = fh.read()
+            except OSError:
+                continue
+            ts = (e.get("ts") or "") + "Z"
+            events.append({"tool": "Snapshot", "file_path": target,
+                           "uuid": f"ckpt:{e.get('file')}",
+                           "ts": ts, "ts_epoch": parse_ts(ts),
+                           "prompt_id": None, "session_id": session,
+                           "ok": True,
+                           "note": "fable checkpoint (after Bash mutation)",
+                           "content": content})
+    return events
+
+
+def _snapshot_events(conn, path_query: str) -> List[dict]:
+    """Claude Code's rewind feature keeps FULL file backups on disk
+    (~/.claude/file-history/<session>/<name>@vN), referenced by
+    file-history-snapshot records. Untruncated ground truth — the best
+    anchors there are."""
+    import os
+    from fable.indexer import parse_ts
+    events = []
+    rows = conn.execute("""
+        SELECT r.uuid, r.session_id, f.path, r.offset, r.length
+        FROM records r JOIN files f ON f.id = r.file_id
+        WHERE r.type = 'file-history-snapshot'""").fetchall()
+    base = _history_dir()
+    for uuid, session_id, fpath, offset, length in rows:
+        try:
+            obj = json.loads(read_span(fpath, offset, length)
+                             .decode("utf-8", "surrogateescape"))
+        except (OSError, ValueError):
+            continue
+        backups = (obj.get("snapshot") or {}).get("trackedFileBackups") or {}
+        for target, info in backups.items():
+            if not (target == path_query
+                    or target.endswith("/" + path_query.lstrip("/"))
+                    or target.endswith(path_query)):
+                continue
+            if not isinstance(info, dict) or not info.get("backupFileName"):
+                continue
+            bpath = os.path.join(base, session_id or "",
+                                 info["backupFileName"])
+            if not os.path.exists(bpath):
+                continue
+            try:
+                with open(bpath, "r", errors="surrogateescape") as fh:
+                    content = fh.read()
+            except OSError:
+                continue
+            ts = info.get("backupTime")
+            events.append({"tool": "Snapshot", "file_path": target,
+                           "uuid": f"{uuid}:{info['backupFileName']}",
+                           "ts": ts, "ts_epoch": parse_ts(ts),
+                           "prompt_id": None, "session_id": session_id,
+                           "ok": True, "note": "rewind checkpoint",
+                           "content": content})
+    return events
+
+
 def file_events(db_path: str, path_query: str) -> List[dict]:
     """Chronological Edit/Write events touching files matching path_query
     (exact path or suffix match)."""
@@ -135,6 +232,8 @@ def file_events(db_path: str, path_query: str) -> List[dict]:
                         if snap is not None:
                             ev["content"], ev["ok"] = snap, True
             events.extend(ev for ev in reads.values() if ev.get("ok"))
+        events.extend(_snapshot_events(conn, path_query))
+        events.extend(_checkpoint_events(path_query))
         events.sort(key=lambda e: (e["ts_epoch"] or 0, e["uuid"]))
         return events
     finally:
@@ -235,15 +334,18 @@ def reconstruct(events: List[dict]) -> List[dict]:
         v = {"uuid": ev["uuid"], "ts": ev["ts"], "tool": ev["tool"],
              "session_id": ev["session_id"], "prompt_id": ev["prompt_id"],
              "ok": True, "note": ev.get("note", "")}
-        if ev["tool"] == "Read":
+        if ev["tool"] in ("Read", "Snapshot"):
             snap = ev.get("content")
             if snap is None:
                 continue
             if current is not None and current == snap:
                 continue  # checkpoint agrees — no new version
-            v["note"] = ("re-anchored from Read snapshot"
+            src = ("rewind checkpoint" if ev["tool"] == "Snapshot"
+                   else "Read snapshot")
+            v["note"] = (f"re-anchored from {src}"
                          if current is None else
-                         "re-anchored — out-of-band changes detected")
+                         f"re-anchored from {src} — out-of-band changes "
+                         "detected")
             current = snap
         elif ev["tool"] == "Write":
             current = ev.get("content")
@@ -286,7 +388,7 @@ def reconstruct(events: List[dict]) -> List[dict]:
         ev = evlist[i]
         if ev["tool"] == "Write":
             continue  # hard barrier: state before a Write is unknowable
-        if ev["tool"] == "Read":
+        if ev["tool"] in ("Read", "Snapshot"):
             # the snapshot is the state just before the Read too (reads
             # don't modify) — derived, since another out-of-band change
             # could sit in between

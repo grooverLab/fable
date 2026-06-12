@@ -142,6 +142,16 @@ def _index_file(conn, path: str, file_id: int, stats, extract_fn=None,
         if not stats.get("session_id") and obj.get("sessionId"):
             stats["session_id"] = obj["sessionId"]
         uuid = obj.get("uuid")
+        if not uuid and obj.get("type") == "file-history-snapshot":
+            # rewind checkpoints: tiny records pointing at full on-disk file
+            # backups (~/.claude/file-history) — gold anchors for file
+            # time-travel. Synthesize a stable identity.
+            snap = obj.get("snapshot") or {}
+            if snap.get("trackedFileBackups"):
+                uuid = (f"fhs:{obj.get('messageId', '?')}:"
+                        f"{snap.get('timestamp', '?')}")
+                obj["uuid"] = uuid
+                obj.setdefault("timestamp", snap.get("timestamp"))
         if not uuid:
             stats["skipped_no_uuid"] += 1
             continue

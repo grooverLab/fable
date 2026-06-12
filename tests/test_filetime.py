@@ -160,3 +160,40 @@ class TestReadReanchoring(unittest.TestCase):
         self.assertEqual(versions[2]["content"], "A\nC-SEDDED\n")
         self.assertTrue(versions[3]["ok"])             # chain healthy again
         self.assertIn("D", versions[3]["content"])
+
+
+class TestPostBashCheckpoints(unittest.TestCase):
+    """The invisible-mutation gap: a Bash command (sed/heredoc) changes a
+    file with no transcript record of the content. The PostToolUse hook
+    snapshots mutated tracked files; filetime uses them as anchors."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        os.environ["FABLE_CHECKPOINTS"] = os.path.join(self.dir, "ckpt")
+
+    def tearDown(self):
+        os.environ.pop("FABLE_CHECKPOINTS", None)
+        shutil.rmtree(self.dir)
+
+    def test_bash_mutation_gets_checkpointed_and_anchors(self):
+        from fable.hook import _post_tool
+        from fable.filetime import _checkpoint_events
+        target = os.path.join(self.dir, "app.py")
+        open(target, "w").write("A\nB\n")
+        # 1) Claude edits the file via the Edit tool -> tracked
+        _post_tool({"session_id": "s1", "tool_name": "Edit",
+                    "tool_input": {"file_path": target}})
+        # 2) a Bash command mutates it out-of-band (the sed case)
+        open(target, "w").write("A\nB-SEDDED\n")
+        os.utime(target, (1e9, 1e9))  # ensure stat change is visible
+        _post_tool({"session_id": "s1", "tool_name": "Bash",
+                    "tool_input": {"command": "sed -i s/B/B-SEDDED/ app.py"}})
+        # 3) the mutated content is checkpointed and usable as an anchor
+        events = _checkpoint_events("app.py")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["content"], "A\nB-SEDDED\n")
+        self.assertIn("after Bash", events[0]["note"])
+        # 4) unchanged file -> no duplicate checkpoint on the next Bash
+        _post_tool({"session_id": "s1", "tool_name": "Bash",
+                    "tool_input": {"command": "ls"}})
+        self.assertEqual(len(_checkpoint_events("app.py")), 1)
