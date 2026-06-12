@@ -182,6 +182,46 @@ def cmd_prune(args):
     from fable.prune import cmd_prune as impl
     return impl(args)
 
+def cmd_costs(args):
+    from fable.serve import api_costs, api_dashboard
+    if args.daily:
+        data = api_dashboard(args.db, {})
+        daily = data["daily"]
+        if args.json:
+            print(json.dumps(daily, indent=2))
+            return 0
+        if not daily:
+            print("no data")
+            return 1
+        current_day = None
+        day_total = 0.0
+        for r in daily:
+            if r["day"] != current_day:
+                if current_day:
+                    print(f"  total: ${day_total:.4f}")
+                current_day = r["day"]
+                day_total = 0.0
+                print(f"\n{r['day']}")
+            day_total += r["cost"]
+            print(f"  {r['model']:<40} ${r['cost']:.4f}")
+        if current_day:
+            print(f"  total: ${day_total:.4f}")
+        return 0
+
+    data = api_costs(args.db, {})
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+    print(f"Total: ${data['total_usd']:.2f}")
+    print("\nBy project:")
+    for proj, cost in sorted(data["by_project"].items(), key=lambda x: -x[1]):
+        print(f"  {proj:<30} ${cost:.2f}")
+    print("\nBy model:")
+    for model, cost in sorted(data["by_model"].items(), key=lambda x: -x[1]):
+        print(f"  {model:<40} ${cost:.2f}")
+    print(f"\n{data['note']}")
+    return 0
+
 
 def build_parser():
     p = argparse.ArgumentParser(prog="fable",
@@ -251,6 +291,13 @@ def build_parser():
 
     sp = sub.add_parser("stats", help="index statistics")
     sp.set_defaults(fn=cmd_stats)
+
+    sp = sub.add_parser("costs", help="API cost analytics")
+    sp.add_argument("--json", action="store_true",
+                    help="machine-readable JSON output")
+    sp.add_argument("--daily", action="store_true",
+                    help="break down costs by day and model")
+    sp.set_defaults(fn=cmd_costs)
 
     sp = sub.add_parser("export", help="export a thread as md/html")
     sp.add_argument("prompt_id")
