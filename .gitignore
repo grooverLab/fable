@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+reference/session-*.jsonl
+reference/vault-sample/
+.DS_Store
+1.env
+*.log
+/tmp/

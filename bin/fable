@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run the fable CLI from anywhere.
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec python3 -c "import sys; sys.path.insert(0, '$DIR'); from fable.cli import main; sys.exit(main())" "$@"

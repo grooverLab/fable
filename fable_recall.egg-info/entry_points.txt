@@ -1,0 +1,2 @@
+[console_scripts]
+fable = fable.cli:main

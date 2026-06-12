@@ -1,0 +1,1400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fable — transcript memory</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,600;9..144,900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#0b0d10; --ink2:#111419; --ink3:#171b22; --line:#232a35;
+  --phos:#ffb454; --phos-dim:#8a6a3a; --ember:#ff6b35;
+  --text:#cdd6e4; --dim:#6b7689; --faint:#3d4654;
+  --green:#7dd87d; --red:#ff5d5d; --cyan:#6cc7d9;
+  --serif:'Fraunces',serif; --mono:'IBM Plex Mono',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--ink); color:var(--text); font:14px/1.55 var(--mono);
+  background-image:
+    radial-gradient(1200px 500px at 70% -10%, rgba(255,180,84,.05), transparent 60%),
+    repeating-linear-gradient(0deg, transparent 0 2px, rgba(255,255,255,.006) 2px 4px);
+}
+::selection{background:var(--phos);color:var(--ink)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ── frame ─────────────────────────────────── */
+.app{display:grid;grid-template-columns:300px 1fr;grid-template-rows:auto 1fr;height:100vh}
+header{
+  grid-column:1/-1;display:flex;align-items:baseline;gap:28px;
+  padding:14px 24px 12px;border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,var(--ink2),var(--ink));
+}
+.wordmark{font:900 30px/1 var(--serif);color:var(--phos);letter-spacing:-.5px}
+.wordmark .tail{color:var(--faint);font-weight:300;font-style:italic}
+.tagline{color:var(--dim);font-size:11px;letter-spacing:.14em;text-transform:uppercase}
+#statsbar{margin-left:auto;display:flex;gap:22px;font-size:11.5px}
+#statsbar b{color:var(--phos);font-weight:600}
+#statsbar span{color:var(--dim)}
+
+/* ── sidebar ───────────────────────────────── */
+aside{
+  border-right:1px solid var(--line);overflow-y:auto;overflow-x:hidden;
+  background:var(--ink2);padding:16px 0 40px;
+}
+aside select{min-width:0;width:100%;text-overflow:ellipsis}
+.side-h{padding:4px 18px 10px;color:var(--faint);font-size:10.5px;
+  letter-spacing:.18em;text-transform:uppercase}
+.proj{margin-bottom:4px}
+.proj-name{
+  display:flex;align-items:center;gap:8px;padding:7px 18px;cursor:pointer;
+  color:var(--text);font-weight:600;font-size:13px;
+}
+.proj-name:hover{background:var(--ink3)}
+.proj-name .tw{color:var(--phos-dim);transition:transform .18s;display:inline-block;font-size:10px}
+.proj.open .tw{transform:rotate(90deg)}
+.proj-name .count{margin-left:auto;color:var(--faint);font-size:11px}
+.sess{display:none}
+.proj.open .sess{display:block}
+.sess a{
+  display:block;padding:6px 18px 6px 36px;color:var(--dim);cursor:pointer;
+  text-decoration:none;font-size:12px;
+  border-left:2px solid transparent;
+}
+.sess a:hover{color:var(--text);background:var(--ink3)}
+.sess a.active{color:var(--phos);border-left-color:var(--phos);background:var(--ink3)}
+.sess .meta{color:var(--faint);font-size:10.5px}
+.sess-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess-actions{display:flex;gap:8px;margin-top:3px;opacity:.55;
+  transition:opacity .15s}
+.sess a:hover .sess-actions{opacity:1}
+
+/* ── main ──────────────────────────────────── */
+main{overflow-y:auto;padding:22px 28px 80px}
+.searchrow{display:flex;gap:10px;margin-bottom:6px;flex-wrap:wrap}
+.searchrow input[type=text]{
+  background:var(--ink3);border:1px solid var(--line);color:var(--text);
+  font:inherit;padding:10px 14px;border-radius:4px;outline:none;
+}
+.searchrow input:focus{border-color:var(--phos-dim);box-shadow:0 0 0 3px rgba(255,180,84,.08)}
+#q{flex:1;min-width:280px;font-size:15px}
+.facet{width:150px;font-size:12px}
+button{
+  background:var(--phos);color:var(--ink);border:0;font:600 13px var(--mono);
+  padding:10px 20px;border-radius:4px;cursor:pointer;letter-spacing:.04em;
+}
+button:hover{background:#ffc370}
+button.ghost{background:transparent;color:var(--dim);border:1px solid var(--line);padding:6px 12px;font-size:11.5px}
+button.ghost:hover{color:var(--phos);border-color:var(--phos-dim);background:transparent}
+.hint{color:var(--faint);font-size:11px;margin-bottom:18px}
+.hint code{color:var(--phos-dim)}
+
+/* result cards */
+.results{display:grid;gap:10px;animation:rise .35s ease both}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1}}
+.hit{
+  border:1px solid var(--line);border-radius:6px;padding:14px 16px;cursor:pointer;
+  background:linear-gradient(180deg,var(--ink2),transparent);position:relative;
+  transition:border-color .15s, transform .15s;
+}
+.hit:hover{border-color:var(--phos-dim);transform:translateX(3px)}
+.hit::before{
+  content:"";position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:3px 0 0 3px;
+  background:var(--faint);
+}
+.hit.t-decision::before{background:var(--ember)}
+.hit.t-workflow::before{background:var(--cyan)}
+.hit.t-insight::before{background:var(--green)}
+.hit.t-concept::before{background:var(--phos)}
+.hit .title{font:600 15px var(--serif);font-size:16px;color:var(--text)}
+.hit .title em{color:var(--faint);font-style:normal;font-weight:400}
+.hit .row2{display:flex;gap:14px;margin-top:6px;font-size:11px;color:var(--dim);flex-wrap:wrap}
+.badge{
+  font-size:10px;padding:1px 8px;border-radius:9px;letter-spacing:.08em;
+  text-transform:uppercase;border:1px solid var(--line);color:var(--dim);
+}
+.b-decision{color:var(--ember);border-color:rgba(255,107,53,.4)}
+.b-workflow{color:var(--cyan);border-color:rgba(108,199,217,.4)}
+.b-insight{color:var(--green);border-color:rgba(125,216,125,.4)}
+.b-concept{color:var(--phos);border-color:rgba(255,180,84,.4)}
+.hit .summary{margin-top:8px;color:var(--dim);font-size:12px;line-height:1.6;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.score{position:absolute;right:14px;top:12px;color:var(--phos-dim);font-size:11px}
+
+/* thread viewer */
+.viewer{animation:rise .3s ease both}
+.viewer-top{display:flex;align-items:center;gap:14px;margin-bottom:14px;flex-wrap:wrap}
+.viewer-top h2{font:600 20px var(--serif);color:var(--phos)}
+.viewer-top .id{color:var(--faint);font-size:11px}
+.budget-wrap{display:flex;align-items:center;gap:10px;margin-left:auto;color:var(--dim);font-size:11.5px}
+input[type=range]{accent-color:var(--phos);width:170px}
+pre.thread{
+  background:var(--ink2);border:1px solid var(--line);border-radius:6px;
+  padding:18px 20px;white-space:pre-wrap;word-break:break-word;
+  font-size:12.5px;line-height:1.65;color:var(--text);
+  max-height:calc(100vh - 280px);overflow-y:auto;
+}
+pre.thread .hdr{color:var(--phos);font-weight:600}
+pre.thread .toolline{color:var(--cyan)}
+pre.thread .trunc{color:var(--ember)}
+pre.thread .secthdr{color:var(--faint)}
+.cardbox{
+  border:1px dashed var(--phos-dim);border-radius:6px;padding:12px 16px;margin-bottom:14px;
+  font-size:12px;background:rgba(255,180,84,.03);
+}
+.cardbox .o{color:var(--green)}
+.cardbox ul{margin:6px 0 0 18px;color:var(--dim)}
+.copied{color:var(--green) !important;border-color:var(--green) !important}
+
+.empty{color:var(--faint);text-align:center;padding:80px 0;font-size:13px}
+.empty .big{font:300 italic 26px var(--serif);color:var(--dim);display:block;margin-bottom:10px}
+.tabs{display:flex;gap:4px;margin-bottom:18px}
+.tab{padding:6px 16px;border-radius:4px 4px 0 0;cursor:pointer;color:var(--dim);
+  border:1px solid transparent;border-bottom:0;font-size:12.5px}
+.tab.active{color:var(--phos);border-color:var(--line);background:var(--ink2)}
+.loading{color:var(--phos-dim);padding:40px;text-align:center;animation:pulse 1.2s infinite}
+@keyframes pulse{50%{opacity:.35}}
+.statgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin-top:8px}
+.stat{border:1px solid var(--line);border-radius:6px;padding:14px;background:var(--ink2)}
+.stat .v{font:600 24px var(--serif);color:var(--phos)}
+.stat .k{color:var(--dim);font-size:11px;letter-spacing:.1em;text-transform:uppercase;margin-top:2px}
+
+select{background:var(--ink3);border:1px solid var(--line);color:var(--text);
+  font:inherit;font-size:12px;padding:9px 8px;border-radius:4px;outline:none}
+.b-agent-sub{color:var(--cyan);border-color:rgba(108,199,217,.35)}
+.b-model{color:var(--faint)}
+
+/* generations / diff */
+.genwrap{margin-top:14px;border:1px solid var(--line);border-radius:6px;
+  background:var(--ink2);padding:14px;font-size:12px}
+.genrow{display:flex;gap:6px;align-items:center;padding:3px 0;cursor:pointer}
+.genrow:hover{background:var(--ink3)}
+.gencell{width:64px;text-align:center;color:var(--dim);font-size:10.5px}
+.gencell.full{color:var(--green)} .gencell.slim{color:var(--ember)}
+.gencell.miss{color:var(--faint)}
+pre.diff{background:var(--ink);border:1px solid var(--line);border-radius:6px;
+  padding:12px;font-size:11.5px;line-height:1.5;overflow:auto;max-height:50vh;
+  white-space:pre-wrap;word-break:break-all}
+pre.diff .add{color:var(--green)} pre.diff .del{color:var(--red)}
+pre.diff .hunk{color:var(--cyan)}
+
+/* graph */
+#graphsvg{width:100%;height:calc(100vh - 200px);background:
+  radial-gradient(800px 400px at 50% 30%, rgba(255,180,84,.04), transparent);
+  border:1px solid var(--line);border-radius:6px}
+.gnode{cursor:pointer}
+.glabel{font:10px var(--mono);fill:var(--dim);pointer-events:none}
+.gtip{position:fixed;background:var(--ink3);border:1px solid var(--phos-dim);
+  border-radius:4px;padding:6px 10px;font-size:11px;pointer-events:none;
+  z-index:9;max-width:340px}
+
+/* surgery */
+.surg-row{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);
+  border-radius:6px;padding:10px 12px;margin-bottom:8px;background:var(--ink2)}
+.surg-row input[type=checkbox]{accent-color:var(--ember);margin-top:3px}
+.surg-row .why{color:var(--ember);font-size:11px}
+.surg-report{border:1px dashed var(--cyan);border-radius:6px;padding:12px 16px;
+  margin:12px 0;font-size:12.5px;background:rgba(108,199,217,.04)}
+button.danger{background:var(--ember);color:var(--ink)}
+button.danger:hover{background:#ff8557}
+.warnbox{color:var(--ember);font-size:11.5px;margin:10px 0}
+
+/* info tooltips */
+.info{display:inline-block;width:15px;height:15px;border-radius:50%;
+  border:1px solid var(--phos-dim);color:var(--phos-dim);font-size:10px;
+  text-align:center;line-height:14px;cursor:help;position:relative;
+  vertical-align:1px;margin-left:4px;font-style:normal}
+.info:hover{color:var(--phos);border-color:var(--phos)}
+#tipbox{position:fixed;z-index:99;background:var(--ink3);
+  border:1px solid var(--phos-dim);padding:10px 12px;width:340px;
+  font:400 11.5px/1.55 var(--mono);color:var(--text);border-radius:5px;
+  white-space:normal;text-transform:none;letter-spacing:0;text-align:left;
+  box-shadow:0 8px 30px rgba(0,0,0,.55);pointer-events:none;display:none}
+.steps{display:flex;gap:18px;margin:8px 0 14px;flex-wrap:wrap}
+.steps span{color:var(--dim);font-size:11.5px}
+.steps b{color:var(--phos);font-family:var(--serif)}
+
+/* sidebar backfill */
+.bf-btn{margin-left:6px;border:1px solid var(--line);border-radius:3px;
+  color:var(--phos-dim);font-size:9.5px;padding:1px 5px;cursor:pointer;
+  letter-spacing:.06em}
+.bf-btn:hover{color:var(--phos);border-color:var(--phos-dim)}
+.bf-bar{height:3px;background:var(--ink3);border-radius:2px;margin:3px 18px 5px}
+.bf-bar i{display:block;height:100%;background:var(--phos);border-radius:2px;
+  transition:width .8s}
+.bf-meta{padding:0 18px 4px;color:var(--dim);font-size:10px}
+
+/* ── The Loom (compose studio) ── */
+.loom-grid{display:grid;grid-template-columns:360px 1fr;gap:20px;
+  height:calc(100vh - 215px)}
+.shelf{display:flex;flex-direction:column;min-height:0}
+.shelf-results{flex:1;overflow-y:auto;margin-top:10px;display:grid;gap:8px;
+  align-content:start;padding-right:4px}
+.shelf-card{border:1px solid var(--line);border-left-width:3px;
+  border-radius:5px;padding:9px 11px;cursor:grab;background:var(--ink2);
+  font-size:11.5px;transition:transform .12s,border-color .12s}
+.shelf-card:hover{border-color:var(--phos-dim);transform:translateX(3px)}
+.shelf-card .sc-t{color:var(--text);font-size:12.5px;
+  font-family:var(--serif);font-weight:600}
+.shelf-card .sc-m{color:var(--faint);font-size:10px;margin-top:2px}
+.loom{position:relative;overflow-y:auto;min-height:0;padding:6px 8px 6px 34px}
+.loom::before{content:"";position:absolute;left:18px;top:0;bottom:0;width:2px;
+  background:repeating-linear-gradient(180deg,var(--phos-dim) 0 6px,transparent 6px 12px);
+  animation:weave 1.2s linear infinite;opacity:.5}
+@keyframes weave{to{background-position:0 12px}}
+.loom-card{position:relative;border:1px solid var(--line);
+  border-left:4px solid var(--faint);border-radius:6px;background:var(--ink2);
+  padding:12px 14px;margin-bottom:6px;animation:rise .3s ease both}
+.loom-card.t-decision{border-left-color:var(--ember)}
+.loom-card.t-workflow{border-left-color:var(--cyan)}
+.loom-card.t-insight{border-left-color:var(--green)}
+.loom-card.t-concept{border-left-color:var(--phos)}
+.loom-card::before{content:"";position:absolute;left:-19px;top:18px;width:10px;
+  height:10px;border-radius:50%;background:var(--ink);border:2px solid var(--phos-dim)}
+.loom-card.dragging{opacity:.4}
+.loom-card.dragover{border-top:2px solid var(--phos)}
+.loom-card .lc-head{display:flex;gap:10px;align-items:baseline;cursor:grab}
+.loom-card .lc-n{font:900 18px var(--serif);color:var(--phos-dim);min-width:22px}
+.loom-card .lc-t{font:600 14px var(--serif);color:var(--text);flex:1}
+.loom-card .lc-m{color:var(--faint);font-size:10.5px;margin-top:4px}
+.loom-card .lc-x{color:var(--faint);cursor:pointer;font-size:13px}
+.loom-card .lc-x:hover{color:var(--ember)}
+.seam-mark{color:var(--faint);font-size:9.5px;letter-spacing:.2em;
+  text-transform:uppercase;padding:1px 0 7px 6px}
+.resume-point{border:1px dashed var(--phos);border-radius:6px;padding:14px 16px;
+  margin-top:4px;background:rgba(255,180,84,.04)}
+.resume-point .rp-caret{display:inline-block;width:9px;height:16px;
+  background:var(--phos);vertical-align:-3px;animation:caret 1s steps(1) infinite}
+@keyframes caret{50%{opacity:0}}
+.meter{height:6px;background:var(--ink3);border-radius:3px;margin:8px 0 4px;overflow:hidden}
+.meter i{display:block;height:100%;border-radius:3px;
+  background:linear-gradient(90deg,var(--green),var(--phos) 70%,var(--ember));
+  transition:width .4s ease}
+.loom-empty{text-align:center;padding:90px 30px;color:var(--faint)}
+.loom-empty .big{font:300 italic 30px var(--serif);color:var(--dim);display:block;margin-bottom:14px}
+.loom-empty .step{font-size:12px;margin:6px 0}
+.loom-empty .step b{color:var(--phos);font-family:var(--serif)}
+#cert{border:1px solid var(--green);border-radius:8px;padding:16px 18px;margin-top:10px;
+  background:rgba(125,216,125,.04);animation:rise .4s ease both}
+#cert code{display:block;background:var(--ink);border:1px solid var(--line);
+  border-radius:5px;padding:10px 12px;margin:10px 0;font-size:12px;color:var(--green);
+  word-break:break-all;cursor:pointer}
+#toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:60;
+  background:var(--ink3);border:1px solid var(--phos-dim);color:var(--phos);
+  padding:9px 18px;border-radius:20px;font-size:12px;display:none;cursor:pointer}
+.tabbadge{background:var(--phos);color:var(--ink);border-radius:9px;
+  font-size:9.5px;padding:0 6px;margin-left:5px;font-weight:600}
+
+/* prune hero */
+.prune-hero{border:1px solid rgba(108,199,217,.55) !important;
+  background:linear-gradient(135deg,rgba(108,199,217,.07),transparent 55%) !important;
+  box-shadow:0 0 28px rgba(108,199,217,.10);position:relative}
+.prune-hero .ph-title{font:600 17px var(--serif);color:var(--cyan)}
+.prune-hero .ph-big{font:900 26px var(--serif);color:var(--green)}
+.prune-hero .ph-sub{color:var(--dim);font-size:11px}
+
+/* diff modal */
+#modal-bg{position:fixed;inset:0;background:rgba(5,7,9,.78);z-index:80;
+  display:none;backdrop-filter:blur(2px)}
+#modal{position:fixed;top:6vh;left:50%;transform:translateX(-50%);z-index:81;
+  width:min(980px,92vw);max-height:86vh;display:none;flex-direction:column;
+  background:var(--ink2);border:1px solid var(--phos-dim);border-radius:10px;
+  box-shadow:0 24px 80px rgba(0,0,0,.7);animation:rise .22s ease both}
+#modal .m-head{display:flex;gap:14px;align-items:center;padding:14px 18px;
+  border-bottom:1px solid var(--line)}
+#modal .m-head b{font:600 15px var(--serif);color:var(--phos)}
+#modal .m-body{overflow:auto;padding:14px 18px}
+#modal .m-x{margin-left:auto;cursor:pointer;color:var(--dim);font-size:18px}
+#modal .m-x:hover{color:var(--ember)}
+
+/* responsive */
+@media(max-width:1200px){.loom-grid{grid-template-columns:300px 1fr}}
+@media(max-width:1000px){
+  .app{grid-template-columns:230px 1fr}
+  .loom-grid{grid-template-columns:1fr;height:auto}
+  .shelf-results{max-height:260px}
+  #statsbar{display:none}
+}
+@media(max-width:760px){
+  .app{grid-template-columns:1fr}
+  aside{display:none}
+  main{padding:14px}
+}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+</head>
+<body>
+<div id="toast" onclick="showTab('compose')"></div>
+<div id="modal-bg" onclick="closeModal()"></div>
+<div id="modal">
+  <div class="m-head"><b id="m-title"></b><span id="m-sub" class="hint" style="margin:0"></span>
+    <span class="m-x" onclick="closeModal()">✕</span></div>
+  <div class="m-body" id="m-body"></div>
+</div>
+<div class="app">
+  <header>
+    <div class="wordmark">fable<span class="tail">·recall</span></div>
+    <div class="tagline">transcript memory engine</div>
+    <div id="statsbar"></div>
+  </header>
+
+  <aside>
+    <div class="side-h">Backfill engine
+      <i class="info" data-tip="Which LLM generates thread cards when you hit ✦ cards on a project. openrouter = free Gemma (needs key in Settings). anthropic = API key billing. claude-cli = headless `claude -p` through your installed Claude Code — bills your Max/Pro SUBSCRIPTION quota, not API credits; runs in a scratch CLAUDE_CONFIG_DIR so its sessions are never indexed back (no inception)."></i>
+    </div>
+    <div style="padding:0 18px 10px;display:flex;gap:6px;min-width:0">
+      <select id="bf-provider" style="flex:1 1 0;font-size:11px" onchange="bfModelOptions();localStorage.setItem('fable-provider',this.value)">
+        <option value="openrouter">openrouter</option>
+        <option value="anthropic">anthropic API</option>
+        <option value="claude-cli">claude CLI (Max)</option>
+        <option value="ollama">ollama (local)</option>
+      </select>
+      <select id="bf-model" style="flex:1 1 0;font-size:11px" onchange="localStorage.setItem('fable-bfmodel',this.value)"></select>
+    </div>
+    <div id="bf-global" style="padding:0 18px 6px"></div>
+    <div class="side-h">Projects / Sessions</div>
+    <div id="tree"><div class="loading">scanning vault…</div></div>
+  </aside>
+
+  <main>
+    <div class="tabs">
+      <div class="tab active" data-tab="search">Search</div>
+      <div class="tab" data-tab="compose">⊞ Compose<span class="tabbadge" id="bk-count" style="display:none"></span></div>
+      <div class="tab" data-tab="graph">Graph</div>
+      <div class="tab" data-tab="surgery">Surgery</div>
+      <div class="tab" data-tab="cards">Cards</div>
+      <div class="tab" data-tab="costs">Dashboard</div>
+      <div class="tab" data-tab="settings">Settings</div>
+      <div class="tab" data-tab="stats">Index</div>
+    </div>
+
+    <section id="view-search">
+      <div class="searchrow">
+        <input id="q" type="text" placeholder="search the archive… (zigzag pivot, PID v3, option chain)" autofocus>
+        <i class="info" style="align-self:center" data-tip="SEARCH: full-text over everything said and done — user prompts, assistant replies, thinking, shell commands, file paths, tool output. Words are OR-combined and BM25-ranked, results grouped per thread. Leave it empty and use only the filters below to BROWSE threads instead."></i>
+        <input id="f-op" class="facet" type="text" list="op-list" placeholder="operative: decide">
+        <i class="info" style="align-self:center" data-tip="OPERATIVE: narrows to threads where a specific ACTION VERB happened (decide, fix, refactor, investigate, migrate…). 'zigzag' + operative:decide finds where you CHOSE something about zigzag, not where you merely mentioned it. Verbs are stem-matched offline against a closed list."></i>
+        <input id="f-target" class="facet" type="text" placeholder="target: sled-zigzag">
+        <i class="info" style="align-self:center" data-tip="TARGET: narrows to threads touching a specific ARTIFACT — a file path, crate, function or identifier (sled-zigzag, ws_voice.rs, iter_records). Extracted by pattern, exact match. Operative × target = verb × noun: 'what did we DECIDE about THIS file'."></i>
+        <button id="go">RECALL</button>
+        <button id="pack" class="ghost" title="assemble a paste-ready context pack from the top results">PACK ⧉</button>
+      </div>
+      <datalist id="op-list"></datalist>
+      <div class="searchrow">
+        <select id="f-sort" title="order results">
+          <option value="relevance">sort: relevance</option>
+          <option value="turns">sort: turns</option>
+          <option value="tokens">sort: tokens</option>
+          <option value="recent">sort: recent</option>
+        </select>
+        <select id="f-kind" title="main conversation vs subagent sidechains">
+          <option value="">agent: all</option>
+          <option value="main">agent: main</option>
+          <option value="subagent">agent: subagent</option>
+        </select>
+        <select id="f-model"><option value="">model: all</option></select>
+        <select id="f-project"><option value="">project: all</option></select>
+        <i class="info" style="align-self:center" data-tip="Filters work with OR without a query: with one they refine the search; with the search box empty they BROWSE all threads (sorted by your sort choice). agent=subagent shows threads dominated by sidechain (Task-tool) records; model comes from each assistant record's own metadata."></i>
+      </div>
+      <div class="hint">facets intersect · click a result to page the raw thread back in · PACK copies a budgeted multi-thread context block · empty search + filters = browse mode</div>
+      <div id="results"><div class="empty"><span class="big">“What was decided, and why?”</span>1,800+ threads indexed at full fidelity. Ask anything.</div></div>
+    </section>
+
+    <section id="view-thread" style="display:none"></section>
+
+    <section id="view-compose" style="display:none">
+      <div class="loom-grid">
+        <div class="shelf">
+          <div class="searchrow" style="margin-bottom:0">
+            <input id="lq" type="text" style="flex:1" placeholder="search the whole archive for threads to weave…">
+            <i class="info" style="align-self:center" data-tip="THE LOOM: weave a brand-new resumable Claude Code session out of threads from ANY session, ANY project. Search here, click a thread to add it to the loom on the right. The loom's order IS the new session's memory order — top is the oldest context, bottom is where Claude wakes up and continues. Originals are never touched. (Validated by the signature replay experiment: the model reads your stitched order as its genuine history.)"></i>
+          </div>
+          <div class="shelf-results" id="lresults">
+            <div class="empty" style="padding:40px 10px">search the archive —<br>every project, every session</div>
+          </div>
+        </div>
+        <div class="loom" id="loom"></div>
+      </div>
+    </section>
+
+    <section id="view-graph" style="display:none">
+      <div class="searchrow">
+        <select id="g-session"><option value="">all sessions</option></select>
+        <button id="g-reload" class="ghost">redraw</button>
+        <span class="hint" style="margin:auto 0">amber=concepts · gray=targets · cyan=wikilinks · phosphor ring=threads · drag, scroll-zoom, click a thread to open it, click a term to search it</span>
+        <i class="info" style="align-self:center" data-tip="HOW THE LINKS WORK: this is an Obsidian-style graph, but you never had to write [[wikilinks]] — links are MINED from the transcripts. Each thread's top terms (concepts = recurring noun phrases ranked by TF-IDF; targets = files/crates/identifiers caught by pattern) become shared nodes when 2+ threads use them. Ember edges are citations (a thread that consumed recalled context from another). Any literal [[wikilink]] that does appear in a transcript is extracted too and shown in cyan — first-class, just never required. Same graph Obsidian would draw if every note had been tagged perfectly, without depending on anyone remembering to tag."></i>
+      </div>
+      <svg id="graphsvg"></svg>
+    </section>
+
+    <section id="view-surgery" style="display:none">
+      <div class="searchrow">
+        <select id="s-session"></select>
+        <button id="s-load" class="ghost">analyze session</button>
+        <button id="s-preview" style="display:none">PREVIEW PLAN</button>
+        <button id="s-apply" class="danger" style="display:none">APPLY SURGERY</button>
+      </div>
+      <div class="steps">
+        <span><b>1</b> pick a session &amp; ANALYZE — every thread is listed, risky ones pre-ticked with a reason</span>
+        <span><b>2</b> tick / untick the threads to remove</span>
+        <span><b>3</b> PREVIEW — a pure simulation: records removed, tokens saved, chain validity (nothing is written)</span>
+        <span><b>4</b> APPLY — vault backup first, then atomic rewrite</span>
+        <i class="info" data-tip="WHAT SURGERY IS: your live transcript is Claude Code's working memory — every byte in it costs context. Surgery removes WHOLE THREADS (a prompt + everything it caused) that no longer earn their tokens: tool-noise dumps, subagent exploration, work superseded by a later attempt. WHY IT'S SAFE: it refuses sessions active in the last 60s; a vault backup generation is sealed and indexed BEFORE anything is touched; an evict gate proves every dropped record has an immutable copy; the rewrite is atomic (temp+fsync+rename) and parentUuid chains are re-stitched so Claude Code can still resume the session. Dropped threads remain searchable and recallable here forever — surgery moves memory from working set to archive, it never deletes it."></i>
+      </div>
+      <div class="genwrap prune-hero" style="margin-bottom:12px">
+        <span class="ph-title">⚗ Message slimming (prune)</span>
+        <i class="info" data-tip="The other scalpel: prune keeps EVERY thread and turn but slims each message — tool outputs become '[pruned]', noise records drop, optionally images strip. The conversation skeleton stays complete. Use prune for routine weight loss; use thread surgery below to remove whole dead conversations. Both: vault backup first, everything stays recallable in fable."></i>
+        <span class="ph-sub" style="margin-left:8px">your live transcript is paying rent for every byte — this is the cheapest eviction</span>
+        <div id="p-report" style="margin-top:10px;font-size:12px"><span class="loading" style="padding:0">scanning live file…</span></div>
+        <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
+          <span class="bf-btn" onclick="previewPrune()" title="re-scan the live file">↻ rescan</span>
+          <label style="font-size:11px;color:var(--dim)"><input type="checkbox" id="p-img" style="accent-color:var(--phos)" onchange="renderPruneHero()"> also strip images</label>
+          <span class="bf-btn" id="p-apply" style="display:none;color:var(--ember);border-color:var(--ember)" onclick="applyPrune()" title="backup → gate → atomic rewrite of the live transcript">⚗ APPLY PRUNE</span>
+        </div>
+      </div>
+      <div id="s-report"></div>
+      <div id="s-list"><div class="empty">pick a session with a live transcript and hit analyze</div></div>
+    </section>
+
+    <section id="view-cards" style="display:none"><div class="loading">loading cards…</div></section>
+
+    <section id="view-costs" style="display:none"><div class="loading">computing telemetry…</div></section>
+
+    <section id="view-settings" style="display:none"><div class="loading">loading…</div></section>
+
+    <section id="view-stats" style="display:none"><div class="loading">loading…</div></section>
+  </main>
+</div>
+
+<script>
+/* floating tooltips: position:fixed escapes the sidebar's overflow clip */
+const tipbox=document.createElement("div");tipbox.id="tipbox";
+document.body.appendChild(tipbox);
+document.addEventListener("mouseover",e=>{
+  const el=e.target.closest(".info");
+  if(!el){tipbox.style.display="none";return}
+  tipbox.textContent=el.dataset.tip||"";
+  tipbox.style.display="block";
+  const r=el.getBoundingClientRect();
+  const w=356, x=Math.min(r.right+8, innerWidth-w-12);
+  tipbox.style.left=Math.max(8,x)+"px";
+  tipbox.style.top=Math.min(r.top-4, innerHeight-tipbox.offsetHeight-12)+"px";
+});
+const $=s=>document.querySelector(s), api=(p,q={})=>{
+  const u=new URL(p,location.origin);
+  Object.entries(q).forEach(([k,v])=>v!=null&&v!==""&&u.searchParams.set(k,v));
+  return fetch(u).then(r=>r.json());
+};
+const esc=t=>(t??"").toString().replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmt=n=>n>=1e9?(n/1e9).toFixed(1)+"G":n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(1)+"k":(n??0);
+let currentThread=null;
+
+/* ── tabs ── */
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>showTab(t.dataset.tab));
+let activeTab="search";
+function showTab(name){
+  if(name!=="costs")dtip.hide&&dtip.hide();
+  activeTab=name;
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
+  for(const v of ["search","thread","compose","graph","surgery","cards","costs","settings","stats"])
+    $("#view-"+v).style.display="none";
+  $("#view-"+(name==="search"&&currentThread==="open"?"thread":name)).style.display="";
+  if(name==="compose")renderLoom();
+  if(name==="cards")loadCards();
+  if(name==="stats")loadStats();
+  if(name==="graph"){loadGraph().then(()=>{
+    if(SEL.session&&$("#g-session").value!==SEL.session){
+      $("#g-session").value=SEL.session;loadGraph(true);}})}
+  if(name==="surgery"){initSurgery().then(()=>{
+    if(SEL.session){
+      $("#s-session").value=SEL.session;
+      if(lastAnalyzed!==SEL.session){lastAnalyzed=SEL.session;loadSurgery();}
+    }})}
+  if(name==="costs")loadDashboard();
+  if(name==="settings")loadSettings();
+}
+
+/* ── header stats ── */
+api("/api/stats").then(s=>{
+  $("#statsbar").innerHTML=
+    `<div><b>${fmt(s.records)}</b> <span>records</span></div>
+     <div><b>${fmt(s.threads)}</b> <span>threads</span></div>
+     <div><b>${fmt(s.sessions)}</b> <span>sessions</span></div>
+     <div><b>${fmt(s.cards)}</b> <span>cards</span></div>
+     <div><b>${fmt(s.vault_bytes)}B</b> <span>vault</span></div>`;
+});
+
+/* ── sidebar tree ── */
+api("/api/projects").then(projects=>{
+  if(!projects.length){$("#tree").innerHTML='<div class="empty">no sessions indexed<br>run: fable discover</div>';return}
+  $("#tree").innerHTML=projects.map((p,i)=>`
+    <div class="proj ${i===0?"open":""}" data-project="${esc(p.project)}">
+      <div class="proj-name" onclick="this.parentNode.classList.toggle('open')">
+        <span class="tw">▶</span>${esc(p.project)}
+        <span class="bf-btn" title="generate cards for every uncarded thread in this project (OpenRouter free Gemma)" onclick="event.stopPropagation();startBackfill('${esc(p.project)}')">✦ cards</span>
+        <span class="count">${p.sessions.length}</span>
+      </div>
+      <div class="bf-slot"></div>
+      <div class="sess">${p.sessions.map(s=>`
+        <a onclick="openSession('${esc(s.session_id)}',this)" title="session ${esc(s.session_id)} — click to list its threads">
+          <div class="sess-name">${s.pinned?'<span style="color:var(--phos)">★ </span>':""}${esc(s.title||s.session_id.slice(0,12))}<span class="meta"> · ${s.threads}th</span></div>
+          <div class="sess-actions">
+            <span class="bf-btn" title="${s.pinned?"unpin this session":"pin this session to the top of the project"}" onclick="event.stopPropagation();togglePin('${esc(s.session_id)}',${s.pinned?0:1})">★ ${s.pinned?"unpin":"pin"}</span>
+            <span class="bf-btn" title="generate summary cards for ONLY this session's threads (uses the Backfill engine provider/model above)" onclick="event.stopPropagation();startBackfill(null,'${esc(s.session_id)}')">✦ cards</span>
+            <span class="bf-btn" title="copy a 'claude --resume' command for this session to the clipboard" onclick="event.stopPropagation();copyResume('${esc(s.session_id)}')">⎘ resume</span>
+          </div>
+        </a>`).join("")}
+      </div>
+    </div>`).join("");
+});
+
+/* ── global selection: the sidebar drives every workspace ── */
+const SEL={project:null,session:null};
+let lastAnalyzed=null;
+function setSelection(project,session){
+  SEL.project=project||SEL.project;SEL.session=session||null;
+  // search project filter follows
+  const fp=$("#f-project");
+  if(SEL.project&&[...fp.options].some(o=>o.value===SEL.project)){
+    if(fp.value!==SEL.project){fp.value=SEL.project;fp.dispatchEvent(new Event("change"))}
+  }
+  // graph + surgery dropdowns follow
+  const gs=$("#g-session");
+  if(SEL.session&&gs&&[...gs.options].some(o=>o.value===SEL.session))gs.value=SEL.session;
+  const ss=$("#s-session");
+  if(SEL.session&&ss&&[...ss.options].some(o=>o.value===SEL.session))ss.value=SEL.session;
+  const anchor=$("#bk-anchor");
+  if(anchor)anchor.textContent="→ "+(SEL.session?SEL.session.slice(0,8):SEL.project||"pick a session");
+}
+async function openSession(sid,el){
+  document.querySelectorAll(".sess a").forEach(a=>a.classList.remove("active"));
+  if(el)el.classList.add("active");
+  setSelection(el?.closest(".proj")?.dataset.project,sid);
+  // the selection loads INTO whatever workspace is open — no tab hijack
+  if(activeTab==="surgery"){
+    $("#s-session").value=sid;lastAnalyzed=sid;loadSurgery();return}
+  if(activeTab==="graph"){$("#g-session").value=sid;loadGraph(true);return}
+  if(activeTab==="compose"){renderLoom();return}
+  if(activeTab==="costs"){DASH_SCOPE=null;showTab("costs");return}
+  if(activeTab==="settings"||activeTab==="stats"
+     ||activeTab==="cards"){showTab(activeTab)}
+  else showTab("search");
+  currentThread=null;
+  if(activeTab!=="search"&&activeTab!=="thread")return;
+  $("#results").innerHTML='<div class="loading">loading session threads…</div>';
+  const threads=await api("/api/threads",{session:sid});
+  $("#results").innerHTML=threads.length?threads.map(t=>hitHtml({
+    prompt_id:t.prompt_id,title:t.title,type:t.type,outcome:t.outcome,
+    turn_count:t.turn_count,est_tokens:t.est_tokens,first_ts:t.first_ts,
+    sidechain_turns:t.sidechain_turns,models:t.models,matches:null
+  })).join(""):'<div class="empty">no threads in this session</div>';
+}
+
+/* ── search ── */
+$("#go").onclick=doSearch;
+["q","f-op","f-target"].forEach(id=>$("#"+id).addEventListener("keydown",e=>e.key==="Enter"&&doSearch()));
+function searchParams(){
+  return {q:$("#q").value.trim(),op:$("#f-op").value.trim(),
+    target:$("#f-target").value.trim(),sort:$("#f-sort").value,
+    kind:$("#f-kind").value,model:$("#f-model").value.trim(),
+    project:$("#f-project").value.trim()};
+}
+api("/api/facets").then(f=>{
+  (f.models||[]).forEach(m=>{const o=document.createElement("option");
+    o.value=m;o.textContent="model: "+shortModel(m);$("#f-model").appendChild(o)});
+  (f.projects||[]).forEach(p=>{const o=document.createElement("option");
+    o.value=p;o.textContent="project: "+p;$("#f-project").appendChild(o)});
+  (f.operatives||[]).forEach(op=>{const o=document.createElement("option");
+    o.value=op;$("#op-list").appendChild(o)});
+});
+async function doSearch(){
+  const p=searchParams();
+  if(!p.q&&!(p.op||p.target||p.kind||p.model||p.project))return;
+  showTab("search");currentThread=null;
+  $("#results").innerHTML='<div class="loading">recalling…</div>';
+  const hits=await api("/api/search",searchParams());
+  if(hits.error){$("#results").innerHTML=`<div class="empty">${esc(hits.error)}</div>`;return}
+  $("#results").innerHTML=hits.length?hits.map(hitHtml).join("")
+    :'<div class="empty"><span class="big">nothing surfaced</span>try broader words — FTS is OR-ranked</div>';
+}
+["f-sort","f-kind","f-model","f-project"].forEach(id=>
+  $("#"+id).addEventListener("change",doSearch));
+$("#f-op").addEventListener("change",doSearch);
+$("#pack").onclick=async()=>{
+  const q=$("#q").value.trim();if(!q)return;
+  $("#pack").textContent="packing…";
+  const r=await api("/api/context",{q,budget:localStorage.getItem("fable-budget")||12000});
+  await navigator.clipboard.writeText(r.pack||"");
+  $("#pack").textContent="copied ✓";$("#pack").classList.add("copied");
+  setTimeout(()=>{$("#pack").textContent="PACK ⧉";$("#pack").classList.remove("copied")},1800);
+};
+function hitHtml(h){
+  const type=h.type||"";
+  if(h.agent==null&&h.sidechain_turns!=null)
+    h.agent=(h.sidechain_turns*2>(h.turn_count||0))?"subagent":"main";
+  return `<div class="hit t-${esc(type)}" onclick="openThread('${esc(h.prompt_id)}')">
+    ${h.score?`<div class="score">▮ ${h.score}</div>`:""}
+    <div class="title">${esc(h.title||"")}${h.title?"":`<em>${esc(h.prompt_id)}</em>`}</div>
+    <div class="row2">
+      ${type?`<span class="badge b-${esc(type)}">${esc(type)}</span>`:""}
+      ${h.agent==="subagent"?'<span class="badge b-agent-sub">subagent</span>':""}
+      ${h.models?`<span class="badge b-model" title="${esc(h.models)}">${esc(shortModel(h.models))}</span>`:""}
+      ${h.project?`<span>${esc(h.project)}</span>`:""}
+      ${h.session_title?`<span>${esc(h.session_title)}</span>`:""}
+      <span>${h.turn_count??"?"} turns</span><span>~${fmt(h.est_tokens)} tok</span>
+      ${h.matches!=null?`<span>${h.matches} matching records</span>`:""}
+      <span>${esc((h.first_ts||"").slice(0,10))}</span>
+    </div>
+    ${h.outcome?`<div class="summary">↳ ${esc(h.outcome)}</div>`:""}
+    <span class="bf-btn" style="position:absolute;right:14px;bottom:10px" title="weave this thread into the Compose loom" onclick="event.stopPropagation();addToBasket('${esc(h.prompt_id)}','${esc((h.title||h.prompt_id.slice(0,8)).replace(/'/g,""))}',${h.est_tokens||0},'${esc(h.type||"")}','${esc(h.project||"")}')">⊞</span>
+  </div>`;
+}
+
+/* ── thread viewer ── */
+async function openThread(id,budget){
+  currentThread="open";
+  for(const v of["search","cards","stats"])$("#view-"+v).style.display="none";
+  const view=$("#view-thread");view.style.display="";
+  budget=budget||+(localStorage.getItem("fable-budget")||8000);
+  view.innerHTML='<div class="loading">seeking byte spans in the vault…</div>';
+  const t=await api("/api/thread",{id,budget});
+  if(t.error){view.innerHTML=`<div class="empty">${esc(t.error)}</div>`;return}
+  const card=t.card;
+  view.innerHTML=`
+    <div class="viewer">
+      <div class="viewer-top">
+        <button class="ghost" onclick="showTab('search');currentThread=null">← back</button>
+        <h2>${esc(card?.title||"thread")}</h2>
+        <span class="id">${esc(t.prompt_id)}</span>
+        <div class="budget-wrap">
+          budget <input type="range" min="500" max="32000" step="500" value="${budget}"
+            onchange="localStorage.setItem('fable-budget',this.value);openThread('${esc(id)}',+this.value)">
+          <span>${fmt(budget)} tok</span>
+          <button class="ghost" id="copybtn">copy for session</button>
+          <button class="ghost" id="genbtn">⏱ generations / diff</button>
+          <button class="ghost" onclick="exportThread('${esc(id)}','md')">⤓ md</button>
+          <button class="ghost" onclick="exportThread('${esc(id)}','html')">⤓ html</button>
+          <i class="info" data-tip="GENERATIONS: every prune cycle seals a backup of this transcript. This grid shows EVERY copy of EVERY record in this thread across those vault generations — green = fullest copy, ember = pruned/slimmer, dot = absent. Click any row marked ⇄ to see a unified diff of exactly what pruning removed from that record. This is what 'nothing is ever lost' looks like."></i>
+        </div>
+      </div>
+      <div id="genpanel"></div>
+      ${card?`<div class="cardbox">
+        <span class="badge b-${esc(card.type)}">${esc(card.type)}</span>
+        <span class="o"> ${esc(card.outcome||"")}</span>
+        <div style="margin-top:6px;color:var(--dim)">${esc(card.summary||"")}</div>
+        ${renderList(card.decisions)}
+      </div>`:""}
+      <pre class="thread">${colorize(esc(t.text))}</pre>
+    </div>`;
+  $("#copybtn").onclick=()=>{
+    navigator.clipboard.writeText(t.text).then(()=>{
+      const b=$("#copybtn");b.textContent="copied ✓";b.classList.add("copied");
+      setTimeout(()=>{b.textContent="copy for session";b.classList.remove("copied")},1600);
+    });
+  };
+  $("#genbtn").onclick=()=>toggleGenerations(id);
+}
+
+/* ── generations / diff viewer ── */
+async function toggleGenerations(id){
+  const panel=$("#genpanel");
+  if(panel.innerHTML){panel.innerHTML="";return}
+  panel.innerHTML='<div class="loading">reading copies table…</div>';
+  const g=await api("/api/generations",{id});
+  if(g.error){panel.innerHTML=`<div class="empty">${esc(g.error)}</div>`;return}
+  const gens=g.generations;
+  const note=gens.length<2
+    ?`<div class="hint" style="margin:0 0 8px">this thread exists in only ${gens.length} file so far — diffs appear once a prune or compaction seals more vault generations of it</div>`
+    :`<div class="hint" style="margin:0 0 8px">click any row marked ⇄ to open the diff of what pruning removed</div>`;
+  const head=note+`<div class="genrow" style="cursor:default;font-weight:600">
+    <div style="flex:1">record (every copy across vault generations — green=fullest, ember=pruned)</div>
+    ${gens.map(x=>`<div class="gencell" title="${esc(x.label)}">${esc(x.label.replace('.jsonl','').replace('-pruned',''))}</div>`).join("")}
+  </div>`;
+  const rows=g.records.map(r=>{
+    const best=Math.max(...r.copies.map(c=>c.length));
+    const byFile={};r.copies.forEach(c=>byFile[c.file_id]=c);
+    const cells=gens.map(x=>{
+      const c=byFile[x.file_id];
+      if(!c)return '<div class="gencell miss">·</div>';
+      const cls=c.length===best?"full":"slim";
+      return `<div class="gencell ${cls}">${fmt(c.length)}</div>`;
+    }).join("");
+    const diffable=r.copies.length>1&&new Set(r.copies.map(c=>c.length)).size>1;
+    return `<div class="genrow" ${diffable?`onclick="showDiff('${esc(r.uuid)}',${JSON.stringify(r.copies.map(c=>c.file_id)).replaceAll('"',"&quot;")})"`:""}>
+      <div style="flex:1;color:${diffable?"var(--text)":"var(--dim)"}">
+        ${esc(r.role||r.type)} ${esc(r.uuid.slice(0,8))} ${diffable?"⇄ diff":""}</div>${cells}</div>`;
+  }).join("");
+  panel.innerHTML=`<div class="genwrap">${head}${rows}<div id="diffbox"></div></div>`;
+}
+function openModal(title,sub,bodyHtml){
+  $("#m-title").textContent=title;$("#m-sub").textContent=sub||"";
+  $("#m-body").innerHTML=bodyHtml;
+  $("#modal-bg").style.display="block";$("#modal").style.display="flex";
+}
+function confirmModal(msg){
+  return new Promise(res=>{
+    openModal("confirm","",`<div style="padding:6px 2px">
+      <div style="color:var(--text);font-size:12.5px;line-height:1.8;white-space:pre-line">${esc(msg)}</div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px">
+        <button class="ghost" id="cm-no">cancel</button>
+        <button id="cm-yes" style="padding:7px 22px">proceed</button>
+      </div></div>`);
+    $("#cm-no").onclick=()=>{closeModal();res(false)};
+    $("#cm-yes").onclick=()=>{closeModal();res(true)};
+  });
+}
+function closeModal(){
+  $("#modal-bg").style.display="none";$("#modal").style.display="none";
+}
+document.addEventListener("keydown",e=>{if(e.key==="Escape")closeModal()});
+async function showDiff(uuid,fileIds){
+  openModal("⇄ generation diff","record "+uuid.slice(0,8)+" — fullest vs most-pruned copy",
+    '<div class="loading">diffing…</div>');
+  const d=await api("/api/diff",{uuid,a:fileIds[0],b:fileIds[fileIds.length-1]});
+  if(d.error){$("#m-body").innerHTML=`<div class="empty">${esc(d.error)}</div>`;return}
+  if(d.identical){$("#m-body").innerHTML='<div class="empty" style="padding:30px">these copies are byte-identical — pruning has not touched this record</div>';return}
+  $("#m-sub").textContent=`${d.a} → ${d.b} · red = what pruning removed`;
+  $("#m-body").innerHTML=`<pre class="diff" style="max-height:none">${d.diff.map(l=>{
+    const e=esc(l);
+    if(l.startsWith("+"))return `<span class="add">${e}</span>`;
+    if(l.startsWith("-"))return `<span class="del">${e}</span>`;
+    if(l.startsWith("@@"))return `<span class="hunk">${e}</span>`;
+    return e;
+  }).join("\n")}</pre>`;
+}
+
+/* ── memory graph ── */
+let graphLoaded=false;
+async function loadGraph(force){
+  if(graphLoaded&&!force)return;
+  graphLoaded=true;
+  const sel=$("#g-session");
+  if(sel.options.length<=1){
+    const projects=await api("/api/projects");
+    projects.forEach(p=>p.sessions.forEach(s=>{
+      const o=document.createElement("option");
+      o.value=s.session_id;o.textContent=`${p.project} / ${s.title||s.session_id.slice(0,8)}`;
+      sel.appendChild(o);
+    }));
+  }
+  const data=await api("/api/graph",{session:sel.value,cap:120});
+  drawGraph(data);
+}
+$("#g-reload")&&($("#g-reload").onclick=()=>loadGraph(true));
+document.addEventListener("change",e=>{if(e.target.id==="g-session")loadGraph(true)});
+function drawGraph(data){
+  const svg=d3.select("#graphsvg");svg.selectAll("*").remove();
+  const W=svg.node().clientWidth,H=svg.node().clientHeight;
+  const g=svg.append("g");
+  svg.call(d3.zoom().scaleExtent([.2,5]).on("zoom",e=>g.attr("transform",e.transform)));
+  const color={thread:"#ffb454",concept:"#8a6a3a",target:"#6b7689",wikilink:"#6cc7d9"};
+  const sim=d3.forceSimulation(data.nodes)
+    .force("link",d3.forceLink(data.links).id(d=>d.id)
+      .distance(l=>l.kind==="citation"?60:90).strength(l=>Math.min(.9,(l.weight||1)/20)))
+    .force("charge",d3.forceManyBody().strength(-120))
+    .force("center",d3.forceCenter(W/2,H/2))
+    .force("collide",d3.forceCollide(14));
+  const link=g.append("g").selectAll("line").data(data.links).join("line")
+    .attr("stroke",l=>l.kind==="citation"?"#ff6b35":"#232a35")
+    .attr("stroke-width",l=>l.kind==="citation"?1.6:Math.min(3,.4+(l.weight||1)/10));
+  const tip=d3.select("body").append("div").attr("class","gtip").style("display","none");
+  const node=g.append("g").selectAll("circle").data(data.nodes).join("circle")
+    .attr("class","gnode")
+    .attr("r",d=>d.group==="thread"?Math.min(16,5+Math.sqrt((d.tokens||10)/60)):4+Math.min(8,(d.df||1)))
+    .attr("fill",d=>d.group==="thread"?"#171b22":color[d.group]||"#555")
+    .attr("stroke",d=>d.group==="thread"?color.thread:"none")
+    .attr("stroke-width",1.6)
+    .on("mouseover",(e,d)=>tip.style("display","block")
+      .html(d.group==="thread"
+        ?`<b>${esc(d.label)}</b><br>${d.turns||"?"} turns · ~${fmt(d.tokens)} tok · ${esc(d.type||"")}`
+        :`<b>[[${esc(d.label)}]]</b><br>${esc(d.group)} · in ${d.df} threads`))
+    .on("mousemove",e=>tip.style("left",(e.clientX+14)+"px").style("top",(e.clientY+8)+"px"))
+    .on("mouseout",()=>tip.style("display","none"))
+    .on("click",(e,d)=>{
+      if(d.group==="thread")openThread(d.id);
+      else{$("#q").value=d.label;showTab("search");doSearch();}
+    })
+    .call(d3.drag()
+      .on("start",(e,d)=>{if(!e.active)sim.alphaTarget(.25).restart();d.fx=d.x;d.fy=d.y})
+      .on("drag",(e,d)=>{d.fx=e.x;d.fy=e.y})
+      .on("end",(e,d)=>{if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null}));
+  const label=g.append("g").selectAll("text")
+    .data(data.nodes.filter(d=>d.group!=="thread"||d.tokens>800)).join("text")
+    .attr("class","glabel").text(d=>d.label.length>26?d.label.slice(0,25)+"…":d.label);
+  sim.on("tick",()=>{
+    link.attr("x1",l=>l.source.x).attr("y1",l=>l.source.y)
+        .attr("x2",l=>l.target.x).attr("y2",l=>l.target.y);
+    node.attr("cx",d=>d.x).attr("cy",d=>d.y);
+    label.attr("x",d=>d.x+10).attr("y",d=>d.y+3);
+  });
+}
+
+/* ── surgery ── */
+let surgeryInit=false;
+async function initSurgery(){
+  if(surgeryInit)return;surgeryInit=true;
+  $("#s-session").addEventListener("change",()=>{lastAnalyzed=$("#s-session").value;loadSurgery()});
+  const sel=$("#s-session");
+  const projects=await api("/api/projects");
+  projects.forEach(p=>p.sessions.forEach(s=>{
+    const o=document.createElement("option");
+    o.value=s.session_id;
+    o.textContent=`${p.project} / ${s.title||s.session_id.slice(0,8)} (${s.threads} threads)`;
+    sel.appendChild(o);
+  }));
+  $("#s-load").onclick=loadSurgery;
+  $("#s-preview").onclick=previewSurgery;
+  $("#s-apply").onclick=applySurgery;
+}
+async function loadSurgery(){
+  const session=$("#s-session").value;
+  $("#s-report").innerHTML="";
+  $("#s-list").innerHTML='<div class="loading">analyzing threads…</div>';
+  const [sug,threads]=await Promise.all([
+    api("/api/suggestions",{session}),api("/api/threads",{session})]);
+  if(sug.error||threads.error){
+    $("#s-list").innerHTML=`<div class="empty">${esc(sug.error||threads.error)}</div>`;return}
+  const reasons={};(sug||[]).forEach(s=>reasons[s.prompt_id]=s.reasons);
+  $("#s-preview").style.display="";
+  previewPrune();  // the hero: savings appear without being asked
+  $("#s-list").innerHTML=threads.map(t=>`
+    <div class="surg-row">
+      <input type="checkbox" value="${esc(t.prompt_id)}" ${reasons[t.prompt_id]?"checked":""}>
+      <div style="flex:1">
+        <div>${esc(t.title||t.prompt_id)} <span class="hint">· ${t.turn_count} turns · ~${fmt(t.est_tokens)} tok · ${esc((t.first_ts||"").slice(0,10))}</span></div>
+        ${reasons[t.prompt_id]?`<div class="why">⚠ ${reasons[t.prompt_id].map(esc).join(" · ")}</div>`:""}
+      </div>
+    </div>`).join("")||'<div class="empty">no threads</div>';
+}
+async function previewPrune(){
+  const box=$("#p-report");
+  box.innerHTML='<span class="loading" style="padding:0">scanning…</span>';
+  const r=await fetch("/api/prune/plan",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:$("#s-session").value})}).then(x=>x.json());
+  if(r.error){box.innerHTML=`<span class="warnbox" style="margin:0">${esc(r.error)}</span>`;return}
+  $("#p-apply").style.display="";
+  const pct=Math.round(100*r.est_savings_bytes/Math.max(r.total_bytes,1));
+  const pctImg=Math.round(100*r.est_savings_with_images_bytes/Math.max(r.total_bytes,1));
+  window.PRUNE_PREV=r;
+  renderPruneHero();
+}
+function renderPruneHero(){
+  const r=window.PRUNE_PREV; if(!r)return;
+  const box=$("#p-report");
+  const strip=$("#p-img")?.checked;
+  const pct=Math.round(100*r.est_savings_bytes/Math.max(r.total_bytes,1));
+  const pctImg=Math.round(100*r.est_savings_with_images_bytes/Math.max(r.total_bytes,1));
+  const tok=strip?r.est_tokens_saved_with_images:r.est_tokens_saved;
+  const shown=strip?pctImg:pct;
+  box.innerHTML=`
+    <span class="ph-big">~${fmt(tok)} tok</span>
+    <span style="color:var(--text)"> recoverable (${shown}% of the ${fmt(r.total_bytes)}B live file${strip?", images stripped":""})</span>
+    ${r.image_bytes&&!strip?`<span class="ph-sub"> — or <b style="color:var(--green)">${pctImg}%</b> with images stripped (~${fmt(r.est_tokens_saved_with_images)} tok)</span>`:""}
+    <div class="meter" style="max-width:420px"><i style="width:${shown}%"></i></div>
+    <span class="ph-sub">tool results ${fmt(r.tool_result_bytes)}B · noise ${r.noise_records} recs/${fmt(r.noise_bytes)}B · fat tool inputs ${fmt(r.tool_use_input_bytes)}B${r.image_bytes?` · images ${fmt(r.image_bytes)}B`:""}
+    · every byte stays recallable in the vault</span>`;
+}
+async function applyPrune(){
+  if(!await confirmModal("Slim every message in the live transcript?\nA vault backup is sealed first; everything stays recallable in fable."))return;
+  $("#p-report").innerHTML='<span class="loading" style="padding:0">backup → gate → atomic rewrite…</span>';
+  const r=await fetch("/api/prune/apply",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:$("#s-session").value,confirm:true,
+      strip_images:$("#p-img").checked})}).then(x=>x.json());
+  if(r.error){$("#p-report").innerHTML=`<span class="warnbox">${esc(r.error)}</span>`;return}
+  $("#p-apply").style.display="none";
+  $("#p-report").innerHTML=`<span style="color:var(--green)">✓ pruned — ${fmt(r.chars)}B written,
+    chain ${r.chain_valid?"VALID":"BROKEN"}, backup ${esc(r.backup||"sealed")}, re-indexed.</span>`;
+}
+function selectedDrops(){
+  return [...document.querySelectorAll("#s-list input:checked")].map(i=>i.value);
+}
+async function previewSurgery(){
+  const drops=selectedDrops();
+  if(!drops.length){$("#s-report").innerHTML='<div class="warnbox">nothing selected</div>';return}
+  $("#s-report").innerHTML='<div class="loading">simulating…</div>';
+  const r=await fetch("/api/surgery/plan",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:$("#s-session").value,drops})}).then(x=>x.json());
+  if(r.error){$("#s-report").innerHTML=`<div class="warnbox">${esc(r.error)}</div>`;return}
+  $("#s-apply").style.display="";
+  $("#s-report").innerHTML=`<div class="surg-report">
+    plan: drop <b>${r.threads_dropped}</b> threads → remove <b>${r.messages_removed}</b> records,
+    <b>${fmt(r.bytes_removed)}B</b> (~${fmt(r.est_tokens_removed)} tok) ·
+    keep ${r.messages_kept} records · re-parent ${r.reparented} ·
+    chain ${r.chain_valid?'<span style="color:var(--green)">VALID</span>':'<span style="color:var(--red)">BROKEN — apply will refuse</span>'}
+  </div>`;
+}
+async function applySurgery(){
+  const drops=selectedDrops();
+  if(!await confirmModal(`Rewrite the live transcript without ${drops.length} thread(s)?\nA vault backup is taken first; dropped threads stay recallable.`))return;
+  $("#s-report").innerHTML='<div class="loading">backup → gate → atomic rewrite…</div>';
+  const r=await fetch("/api/surgery/apply",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:$("#s-session").value,drops,confirm:true})}).then(x=>x.json());
+  if(r.error){$("#s-report").innerHTML=`<div class="warnbox">${esc(r.error)}</div>`;return}
+  $("#s-apply").style.display="none";
+  $("#s-report").innerHTML=`<div class="surg-report">✓ surgery applied — removed ${r.messages_removed} records
+    (~${fmt(r.est_tokens_removed)} tok), backup ${esc(r.backup||"")} sealed, live file re-indexed.</div>`;
+  loadSurgery();
+}
+function shortModel(models){
+  const m=(models||"").split(",")[0];
+  return m.replace("claude-","").replace(/-\d{8}$/,"");
+}
+
+/* ── The Loom: compose studio ── */
+let BASKET=JSON.parse(localStorage.getItem("fable-basket")||"[]");
+let toastTimer=null;
+function toast(msg){
+  const t=$("#toast");t.textContent=msg;t.style.display="block";
+  clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.style.display="none",2400);
+}
+function addToBasket(id,title,tokens,type,project){
+  if(!BASKET.some(b=>b.id===id)){
+    BASKET.push({id,title,tokens:tokens||0,type:type||"",project:project||""});
+    saveBasket();
+    toast("⊞ woven into Compose ("+BASKET.length+") — click to open the loom");
+  }else toast("already on the loom");
+}
+function saveBasket(){
+  localStorage.setItem("fable-basket",JSON.stringify(BASKET));
+  const b=$("#bk-count");
+  b.style.display=BASKET.length?"":"none";b.textContent=BASKET.length;
+  if($("#view-compose").style.display!=="none")renderLoom();
+}
+function rmBasket(i){BASKET.splice(i,1);saveBasket()}
+function toggleMode(i){
+  BASKET[i].mode=BASKET[i].mode==="card"?"full":"card";saveBasket();
+}
+let dragIdx=null;
+function loomDrag(e,i){dragIdx=i;e.dataTransfer.effectAllowed="move";
+  e.target.closest(".loom-card").classList.add("dragging")}
+function loomOver(e,i){e.preventDefault();
+  document.querySelectorAll(".loom-card").forEach(c=>c.classList.remove("dragover"));
+  e.target.closest(".loom-card")?.classList.add("dragover")}
+function loomDrop(e,i){e.preventDefault();
+  if(dragIdx===null||dragIdx===i)return renderLoom();
+  const[m]=BASKET.splice(dragIdx,1);BASKET.splice(i,0,m);dragIdx=null;saveBasket();
+}
+function renderLoom(){
+  const loom=$("#loom");
+  if(!BASKET.length){
+    loom.innerHTML=`<div class="loom-empty">
+      <span class="big">“Weave a new session from everything you've ever done.”</span>
+      <div class="step"><b>1</b> search the archive on the left — any project, any session</div>
+      <div class="step"><b>2</b> click threads to weave them in · drag to set the order</div>
+      <div class="step"><b>3</b> the bottom of the loom is where Claude wakes up — COMPOSE</div>
+    </div>`;return;
+  }
+  const total=BASKET.reduce((s,b)=>s+(b.mode==="card"?200:(b.tokens||0)),0);
+  const pct=Math.min(100,Math.round(100*total/160000));
+  loom.innerHTML=BASKET.map((b,i)=>`
+    ${i?'<div class="seam-mark">⌁ seam — origin stated to the model</div>':""}
+    <div class="loom-card t-${esc(b.type)}" draggable="true"
+      ondragstart="loomDrag(event,${i})" ondragover="loomOver(event,${i})"
+      ondrop="loomDrop(event,${i})" ondragend="renderLoom()">
+      <div class="lc-head">
+        <span class="lc-n">${i+1}</span>
+        <span class="lc-t">${esc(b.title)}</span>
+        <span class="bf-btn" style="color:${b.mode==="card"?"var(--cyan)":"var(--phos)"}"
+          title="FULL = the verbatim thread records (heavy, exact). CARD = one compact summary record with decisions + a recall pointer (~200 tok). Mix freely: full fidelity for the central topic, cards for background memory."
+          onclick="toggleMode(${i})">${b.mode==="card"?"▢ CARD":"▣ FULL"}</span>
+        <span class="lc-x" title="remove from the loom" onclick="rmBasket(${i})">✕</span>
+      </div>
+      <div class="lc-m">${esc(b.project||"?")} · ~${fmt(b.mode==="card"?200:b.tokens)} tok · ${esc(b.type||"thread")} · drag to reorder</div>
+    </div>`).join("")+`
+    <div class="resume-point">
+      <div style="font:600 15px var(--serif);color:var(--phos)">▶ resume point <span class="rp-caret"></span></div>
+      <div class="hint" style="margin:4px 0 0">Claude wakes up HERE with the above as its lived history · ~${fmt(total)} tok of woven context</div>
+      <div class="meter"><i style="width:${pct}%"></i></div>
+      <div class="hint" style="margin:0 0 10px">${pct}% of a 160k working context</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <input id="bk-title" placeholder="name this workspace… (RRG rebuild, auth refactor)" style="flex:1;min-width:220px;background:var(--ink3);border:1px solid var(--line);color:var(--text);padding:9px 12px;border-radius:4px;font:600 13px var(--serif)">
+        <label class="hint" style="margin:0"><input type="checkbox" id="bk-think" style="accent-color:var(--phos)"> strip thinking</label>
+        <button onclick="doCompose()">⊞ COMPOSE</button>
+        <span class="bf-btn" onclick="BASKET=[];saveBasket()">clear loom</span>
+        <span class="hint" id="bk-anchor" style="margin:0">→ ${SEL.session?esc(SEL.session.slice(0,8)):"select a session in the sidebar (anchors the project)"}</span>
+      </div>
+      <div id="cert" style="display:none"></div>
+    </div>`;
+}
+async function doCompose(){
+  if(!BASKET.length)return;
+  if(!SEL.session){toast("pick a session in the sidebar first — it anchors the project");return}
+  const cert=$("#cert");cert.style.display="block";
+  cert.innerHTML='<span class="loading" style="padding:0">weaving '+BASKET.length+' threads, restitching chains…</span>';
+  const r=await fetch("/api/compose",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({threads:BASKET.map(b=>({id:b.id,mode:b.mode||"full"})),
+      title:($("#bk-title")?.value||"").trim()||"workspace",
+      session:SEL.session,
+      strip_thinking:$("#bk-think")?.checked||false})}).then(x=>x.json());
+  if(r.error){cert.innerHTML=`<span style="color:var(--ember)">${esc(r.error)}</span>`;return}
+  cert.innerHTML=`
+    <div style="font:600 16px var(--serif);color:var(--green)">✓ workspace born — ${r.threads} threads, ${r.records} records, chain-valid</div>
+    <code title="click to copy" onclick="navigator.clipboard.writeText(this.textContent);toast('resume command copied ⎘')">${esc(r.resume)}</code>
+    <div class="hint" style="margin:0">paste that in a terminal — Claude resumes with your woven history. The originals were never touched; this workspace appears in the sidebar after the next index.</div>`;
+}
+$("#lq").addEventListener("keydown",e=>{if(e.key==="Enter")loomSearch()});
+let lqTimer=null;
+$("#lq").addEventListener("input",()=>{clearTimeout(lqTimer);lqTimer=setTimeout(loomSearch,350)});
+async function loomSearch(){
+  const q=$("#lq").value.trim();
+  if(!q)return;
+  $("#lresults").innerHTML='<div class="loading">searching the archive…</div>';
+  const hits=await api("/api/search",{q,n:20});
+  if(hits.error||!hits.length){
+    $("#lresults").innerHTML='<div class="empty" style="padding:30px 10px">nothing surfaced</div>';return}
+  $("#lresults").innerHTML=hits.map(h=>{
+    const t=esc((h.title||h.prompt_id.slice(0,8)).replace(/'/g,""));
+    return `<div class="shelf-card t-${esc(h.type||"")}" style="border-left-color:${h.type?"":"var(--faint)"}"
+      onclick="addToBasket('${esc(h.prompt_id)}','${t}',${h.est_tokens||0},'${esc(h.type||"")}','${esc(h.project||"")}')">
+      <div class="sc-t">${esc(h.title||h.prompt_id.slice(0,10))}</div>
+      <div class="sc-m">${esc(h.project||"?")} · ${h.turn_count||"?"} turns · ~${fmt(h.est_tokens)} tok · ${esc((h.first_ts||"").slice(0,10))}</div>
+    </div>`}).join("");
+}
+saveBasket();
+
+/* ── settings + facts ── */
+async function saveSettings(){
+  const body={};
+  if($("#set-or").value.trim())body.openrouter_key=$("#set-or").value.trim();
+  if($("#set-an").value.trim())body.anthropic_key=$("#set-an").value.trim();
+  if(!Object.keys(body).length)return;
+  const r=await fetch("/api/settings",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(body)}).then(x=>x.json());
+  if(r.error)alert(r.error);else loadSettings();
+}
+async function addFact(){
+  const fact=$("#newfact").value.trim();if(!fact)return;
+  await fetch("/api/facts",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({fact,project:$("#newfact-proj").value.trim()||null})});
+  loadSettings();
+}
+async function forgetFact(id){
+  await fetch("/api/facts",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({forget:id})});
+  loadSettings();
+}
+
+/* ── per-project card backfill (provider-aware) ── */
+const BF_MODELS={openrouter:[["","gemma (free, default)"]],
+  anthropic:[["haiku","haiku (cheapest)"],["sonnet","sonnet (better)"]],
+  "claude-cli":[["haiku","haiku (Max quota)"],["sonnet","sonnet (Max quota)"]],
+  ollama:[["","llama3.2 (default)"],["qwen2.5","qwen2.5"],
+          ["mistral","mistral"],["custom","custom — set OLLAMA_MODEL"]]};
+function bfModelOptions(){
+  const p=$("#bf-provider").value,sel=$("#bf-model");
+  sel.innerHTML=BF_MODELS[p].map(([v,l])=>`<option value="${v}">${l}</option>`).join("");
+  const saved=localStorage.getItem("fable-bfmodel");
+  if(saved&&[...sel.options].some(o=>o.value===saved))sel.value=saved;
+}
+$("#bf-provider").value=localStorage.getItem("fable-provider")||"openrouter";
+bfModelOptions();
+let bfTimer=null;
+async function startBackfill(project,session){
+  const r=await fetch("/api/cards/run",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({project,session,provider:$("#bf-provider").value,
+      model:$("#bf-model").value||null})}).then(x=>x.json());
+  if(r.error){alert(r.error);return}
+  pollBackfill();
+}
+async function stopBackfill(){
+  await fetch("/api/cards/stop",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:"{}"});
+}
+async function pollBackfill(){
+  clearTimeout(bfTimer);
+  const s=await api("/api/backfill");
+  const pct=s.total?Math.round(100*(s.done||0)/s.total):0;
+  const eta=s.eta_seconds!=null?(s.eta_seconds>5400
+    ?Math.round(s.eta_seconds/3600)+"h":Math.round(s.eta_seconds/60)+"m"):"…";
+  const scope=s.session?("session "+(s.session||"").slice(0,8))
+    :(s.project||"all projects");
+  const bar=s.running
+    ?`<div class="bf-bar" style="margin:3px 0"><i style="width:${pct}%"></i></div>
+      <div class="bf-meta" style="padding:0">✦ ${esc(scope)}${s.external?" (CLI)":""} · ${s.done||0}/${s.total} (${pct}%)
+      · ${s.generated||0} ok · ${s.failed||0} fail · ~${eta}
+      ${s.external?"":'<span class="bf-btn" onclick="stopBackfill()" style="color:var(--ember)">■ stop</span>'}</div>`
+    :(s.finished?`<div class="bf-meta" style="padding:0;color:${s.error?"var(--ember)":"var(--green)"}">✦ last run: ${s.generated||0} cards${s.failed?", "+s.failed+" failed":""}${s.error?" — "+esc((s.error||"").slice(0,60)):""}</div>`:"");
+  const g=$("#bf-global");if(g)g.innerHTML=bar;
+  document.querySelectorAll(".proj").forEach(el=>{
+    const slot=el.querySelector(".bf-slot");if(!slot)return;
+    slot.innerHTML=(s.running&&s.project&&el.dataset.project===s.project)?bar:"";
+  });
+  bfTimer=setTimeout(pollBackfill,s.running?4000:15000);
+}
+pollBackfill();
+function renderList(jsonText){
+  try{const arr=JSON.parse(jsonText||"[]");
+    return arr.length?`<ul>${arr.map(d=>`<li>${esc(d)}</li>`).join("")}</ul>`:"";
+  }catch(e){return ""}
+}
+function colorize(text){
+  return text
+    .replace(/^\[(user|assistant|system)[^\]]*\]$/gm,m=>`<span class="hdr">${m}</span>`)
+    .replace(/^\[tool_(use|result)[^\]]*\].*$/gm,m=>`<span class="toolline">${m}</span>`)
+    .replace(/^…? ?\[truncated[^\]]*\]$/gm,m=>`<span class="trunc">${m}</span>`)
+    .replace(/^(--|==)[^<]*$/gm,m=>`<span class="secthdr">${m}</span>`);
+}
+
+/* ── cards tab ── */
+async function loadCards(){
+  const view=$("#view-cards");
+  const cards=await api("/api/cards");
+  view.innerHTML=cards.length?`<div class="results">${cards.map(c=>hitHtml({
+    prompt_id:c.prompt_id,title:c.title,type:c.type,outcome:c.outcome,
+    turn_count:c.turn_count,est_tokens:c.est_tokens,first_ts:c.first_ts,
+    sidechain_turns:c.sidechain_turns,models:c.models,project:c.project
+  })).join("")}</div>`:'<div class="empty"><span class="big">no cards yet</span>add OPENROUTER_API_KEY to .env and run: fable cards run — or hit ✦ cards next to a project in the sidebar</div>';
+}
+
+/* ── Dashboard tab: full usage + cost telemetry ── */
+const MCOLORS={opus:"#ff6b35",fable:"#ffb454",sonnet:"#6cc7d9",haiku:"#7dd87d"};
+const mcolor=m=>{for(const k in MCOLORS)if((m||"").includes(k))return MCOLORS[k];return "#6b7689"};
+let DASH_SCOPE=null; // null = follow sidebar selection · {} = all · {project}|{session}
+function dashDrill(scope){DASH_SCOPE=scope;loadDashboard();}
+const dtip=(()=>{let el=null;return{
+  show(html,ev){if(!el){el=document.createElement("div");el.className="gtip";
+    document.body.appendChild(el)}el.innerHTML=html;el.style.display="block";this.move(ev)},
+  move(ev){if(el){el.style.left=Math.min(ev.clientX+14,innerWidth-220)+"px";
+    el.style.top=(ev.clientY-12)+"px"}},
+  hide(){if(el)el.style.display="none"}}})();
+async function loadDashboard(){
+  const sc=DASH_SCOPE??(SEL.session?{session:SEL.session}
+                        :SEL.project?{project:SEL.project}:{});
+  const d=await api("/api/dashboard",sc);
+  const c=d.costs, f=d.fable, bf=d.backfill;
+  const scopedCost=Math.round(d.daily.reduce((s,r)=>s+r.cost,0)*100)/100;
+  const scopeLabel=d.session?`transcript ${d.session.slice(0,8)} · ${esc(d.project||"")}`
+                  :d.project?`project ${esc(d.project)}`:null;
+  const bfLine=bf.running
+    ?`<span style="color:var(--phos)">backfill RUNNING${bf.external?" (CLI)":""}: ${bf.done}/${bf.total} via ${esc(bf.provider||"?")}${bf.model?"/"+esc(bf.model):""}${bf.eta_seconds?` · ~${Math.round(bf.eta_seconds/60)}m left`:""}</span>`
+    :`<span class="hint">no backfill running · ${f.card_coverage_pct}% of eligible threads carded</span>`;
+  $("#view-costs").innerHTML=`
+    <div style="margin-bottom:10px;font-size:11.5px;color:var(--dim)">scope:
+      ${scopeLabel?`<b style="color:var(--phos)">${scopeLabel}</b>
+        <span class="bf-btn" onclick="dashDrill({})" title="back to all projects">⊗ all</span>`
+      :`all projects <span class="hint">— click a project bar or a session row to drill down · engine metrics stay index-wide</span>`}</div>
+    <div class="statgrid" style="margin-bottom:14px">
+      <div class="stat"><div class="v">$${fmt(scopeLabel?scopedCost:c.total_usd)}</div><div class="k">API-equivalent value${scopeLabel?" (scoped)":""}</div></div>
+      <div class="stat"><div class="v">${fmt(f.records)}</div><div class="k">records indexed</div></div>
+      <div class="stat"><div class="v">${fmt(f.copies)}</div><div class="k">vault copies</div></div>
+      <div class="stat"><div class="v">${fmt(f.threads)}</div><div class="k">threads</div></div>
+      <div class="stat"><div class="v">${f.cards} <span style="font-size:13px;color:var(--dim)">(${f.card_coverage_pct}%)</span></div><div class="k">cards / coverage</div></div>
+      <div class="stat"><div class="v">${fmt(f.vault_bytes)}B</div><div class="k">vault (immutable)</div></div>
+      <div class="stat"><div class="v">${fmt(f.embeddings)}</div><div class="k">embeddings</div></div>
+      <div class="stat"><div class="v">${fmt(f.terms)}</div><div class="k">terms</div></div>
+    </div>
+    <div style="margin-bottom:14px">${bfLine}</div>
+    <div class="genwrap" style="margin-bottom:14px">
+      <b style="color:var(--phos)">Daily API-equivalent spend by model</b>
+      <svg id="ch-daily" style="width:100%;height:220px"></svg>
+    </div>
+    <div style="display:grid;grid-template-columns:280px 1fr;gap:14px;margin-bottom:14px">
+      <div class="genwrap"><b style="color:var(--phos)">Value by model</b>
+        <svg id="ch-donut" style="width:100%;height:220px"></svg></div>
+      <div class="genwrap"><b style="color:var(--phos)">Value by project</b>
+        <svg id="ch-proj" style="width:100%;height:220px"></svg></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div class="genwrap"><b style="color:var(--phos)">Card generation by provider</b>
+        <table style="width:100%;font-size:12px;margin-top:8px;border-collapse:collapse">
+        ${d.provider_cards.map(p=>`<tr><td>${esc(p.source)}</td><td style="color:var(--dim)">${esc(shortModel(p.model))}</td><td style="text-align:right;color:var(--phos)">${p.n}</td></tr>`).join("")||"<tr><td class='hint'>none yet</td></tr>"}</table></div>
+      <div class="genwrap"><b style="color:var(--phos)">Top sessions</b>
+        <table style="width:100%;font-size:11.5px;margin-top:8px;border-collapse:collapse">
+        ${d.top_sessions.map(s=>`<tr>
+          <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;color:var(--cyan)" title="drill the dashboard into this transcript" onclick="dashDrill({session:'${esc(s.session_id)}'})">${esc(s.title||s.session_id.slice(0,8))}</td>
+          <td style="color:var(--dim)">${esc(s.project)}</td>
+          <td style="text-align:right">${s.threads}th</td>
+          <td style="text-align:right;color:var(--dim)">~${fmt(s.tok)}tok</td>
+          <td><span class="bf-btn" onclick="copyResume('${esc(s.session_id)}')" title="copy claude --resume command">⎘ resume</span></td>
+          </tr>`).join("")}</table></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px">
+      <div class="genwrap"><b style="color:var(--phos)">Projects</b>
+        <i class="info" data-tip="Index analytics per project. Click a row to drill every chart above into that project."></i>
+        <table style="width:100%;font-size:11.5px;margin-top:8px;border-collapse:collapse">
+        <tr style="color:var(--faint)"><td>project</td><td style="text-align:right">sessions</td><td style="text-align:right">threads</td><td style="text-align:right">~tokens</td><td style="text-align:right">carded</td></tr>
+        ${(d.projects_rollup||[]).map(p=>`<tr style="cursor:pointer" onclick="dashDrill({project:'${esc(p.project)}'})" title="drill into ${esc(p.project)}">
+          <td style="color:${d.project===p.project?"var(--phos)":"var(--cyan)"}">${esc(p.project||"?")}</td>
+          <td style="text-align:right">${p.sessions}</td>
+          <td style="text-align:right">${fmt(p.threads)}</td>
+          <td style="text-align:right;color:var(--dim)">${fmt(p.tok)}</td>
+          <td style="text-align:right;color:var(--dim)">${p.threads?Math.round(100*p.carded/p.threads):0}%</td></tr>`).join("")}</table></div>
+      <div class="genwrap"><b style="color:var(--phos)">fable engine</b>
+        <i class="info" data-tip="fable's own activity journal (ops table): every search, recall, prune, surgery, compose and gc is logged locally. Health: index size, write-ahead log, semantic backend, PreCompact hook."></i>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 8px">
+          ${(d.ops_summary||[]).map(o=>`<span class="badge" title="last: ${esc(o.last||"")}" style="color:var(--text)">${esc(o.kind)} <b style="color:var(--phos)">${fmt(o.n)}</b></span>`).join("")||'<span class="hint">no operations logged yet — they accrue as you search/recall/prune/surgery/compose</span>'}
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px">
+          <span class="badge">db <b style="color:var(--phos)">${fmt(d.health.db_bytes)}B</b></span>
+          <span class="badge">wal <b style="color:var(--phos)">${fmt(d.health.wal_bytes)}B</b></span>
+          <span class="badge">semantic <b style="color:${d.health.embeddings_backend==="off"?"var(--ember)":"var(--green)"}">${esc(d.health.embeddings_backend)}</b></span>
+          <span class="badge">precompact hook <b style="color:${d.health.hook_installed?"var(--green)":"var(--ember)"}">${d.health.hook_installed?"●":"○"}</b></span>
+        </div>
+        <div style="font-size:10.5px;color:var(--dim);max-height:120px;overflow-y:auto">
+          ${(d.ops_recent||[]).map(o=>`<div>${esc((o.ts||"").slice(5,16))} · <span style="color:var(--cyan)">${esc(o.kind)}</span> <span style="color:var(--faint)">${esc((o.detail||"").slice(0,80))}</span></div>`).join("")}
+        </div></div>
+    </div>
+    <div class="hint" style="margin-top:12px">${esc(c.note)} · pricing table per model family, cache-aware</div>`;
+  const scopedByModel={};d.daily.forEach(r=>{
+    scopedByModel[r.model]=Math.round(((scopedByModel[r.model]||0)+r.cost)*100)/100;});
+  drawDaily(d.daily);
+  drawDonut(scopeLabel?scopedByModel:c.by_model);
+  drawProj(c.by_project,d.project);
+}
+function copyResume(sid){
+  navigator.clipboard.writeText("claude --resume "+sid);
+}
+async function togglePin(sid,val){
+  await fetch("/api/session/meta",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session_id:sid,pinned:val})});
+  location.reload();
+}
+$("#f-project").addEventListener("change",async()=>{
+  // scope model + operative facets to the chosen project
+  const f=await api("/api/facets",{project:$("#f-project").value});
+  const m=$("#f-model");const keep=m.value;
+  m.innerHTML='<option value="">model: all</option>'+
+    (f.models||[]).map(x=>`<option value="${esc(x)}">model: ${esc(shortModel(x))}</option>`).join("");
+  if([...m.options].some(o=>o.value===keep))m.value=keep;
+  $("#op-list").innerHTML=(f.operatives||[]).map(o=>`<option value="${esc(o)}">`).join("");
+});
+function drawDaily(daily){
+  const svg=d3.select("#ch-daily");if(svg.empty())return;
+  const W=svg.node().clientWidth,H=220,m={t:10,r:10,b:24,l:46};
+  const days={};daily.forEach(r=>{(days[r.day]=days[r.day]||{day:r.day})[r.model]=(days[r.day][r.model]||0)+r.cost});
+  const data=Object.values(days).sort((a,b)=>a.day<b.day?-1:1).slice(-60);
+  if(!data.length)return;
+  const models=[...new Set(daily.map(r=>r.model))];
+  const x=d3.scaleBand().domain(data.map(r=>r.day)).range([m.l,W-m.r]).padding(.25);
+  const y=d3.scaleLinear().domain([0,d3.max(data,r=>models.reduce((s,mo)=>s+(r[mo]||0),0))]).nice().range([H-m.b,m.t]);
+  data.forEach(r=>{let y0=0;models.forEach(mo=>{const v=r[mo]||0;if(!v)return;
+    svg.append("rect").attr("x",x(r.day)).attr("width",x.bandwidth())
+      .attr("y",y(y0+v)).attr("height",y(y0)-y(y0+v)).attr("fill",mcolor(mo)).attr("rx",1)
+      .style("cursor","crosshair")
+      .on("mousemove",ev=>dtip.show(`<b style="color:var(--phos)">${r.day}</b><br>${esc(shortModel(mo))} · <b>$${v.toFixed(2)}</b><br><span style="color:var(--dim)">${fmt(r[mo+"_msgs"]||0)||""}</span>`,ev))
+      .on("mouseleave",()=>dtip.hide());y0+=v})});
+  svg.append("g").attr("transform","translate(0,"+(H-m.b)+")")
+    .call(d3.axisBottom(x).tickValues(x.domain().filter((d,i)=>!(i%Math.ceil(data.length/9)))).tickFormat(t=>t.slice(5)))
+    .attr("color","#3d4654").selectAll("text").attr("fill","#6b7689").style("font-size","9px");
+  svg.append("g").attr("transform","translate("+m.l+",0)")
+    .call(d3.axisLeft(y).ticks(4).tickFormat(v=>"$"+fmt(v)))
+    .attr("color","#3d4654").selectAll("text").attr("fill","#6b7689").style("font-size","9px");
+}
+function drawDonut(byModel){
+  const svg=d3.select("#ch-donut");if(svg.empty())return;
+  const W=svg.node().clientWidth,H=220,R=Math.min(W,H)/2-8;
+  const g=svg.append("g").attr("transform","translate("+W/2+","+H/2+")");
+  const entries=Object.entries(byModel);
+  const arcs=d3.pie().value(e=>e[1])(entries);
+  const arc=d3.arc().innerRadius(R*.62).outerRadius(R);
+  g.selectAll("path").data(arcs).join("path").attr("d",arc)
+    .attr("fill",a=>mcolor(a.data[0])).attr("stroke","#0b0d10")
+    .style("cursor","crosshair")
+    .on("mousemove",(ev,a)=>dtip.show(`<b style="color:var(--phos)">${esc(shortModel(a.data[0]))}</b> · $${fmt(a.data[1])}<br><span style="color:var(--dim)">${Math.round(100*a.data[1]/Math.max(total,0.01))}% of scope</span>`,ev))
+    .on("mouseleave",()=>dtip.hide());
+  const total=entries.reduce((s,e)=>s+e[1],0);
+  g.append("text").attr("text-anchor","middle").attr("dy","0.32em")
+    .attr("fill","#ffb454").style("font","600 18px Fraunces").text("$"+fmt(total));
+}
+function drawProj(byProject,active){
+  const svg=d3.select("#ch-proj");if(svg.empty())return;
+  const W=svg.node().clientWidth,H=220,m={l:90,r:50};
+  const entries=Object.entries(byProject).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  const y=d3.scaleBand().domain(entries.map(e=>e[0])).range([10,H-10]).padding(.3);
+  const x=d3.scaleLinear().domain([0,entries[0]?.[1]||1]).range([0,W-m.l-m.r]);
+  const total=entries.reduce((s,e)=>s+e[1],0);
+  entries.forEach(([p,v])=>{
+    const isActive=active===p;
+    svg.append("text").attr("x",m.l-8).attr("y",y(p)+y.bandwidth()/2+3)
+      .attr("text-anchor","end").attr("fill",isActive?"#ffb454":"#6b7689")
+      .style("font-size","10px").style("cursor","pointer")
+      .text(p.length>13?p.slice(0,12)+"…":p)
+      .on("click",()=>dashDrill(isActive?{}:{project:p}));
+    svg.append("rect").attr("x",m.l).attr("y",y(p)).attr("height",y.bandwidth())
+      .attr("width",Math.max(2,x(v)))
+      .attr("fill",isActive?"#ff6b35":"#ffb454")
+      .attr("opacity",isActive?1:.85).attr("rx",2)
+      .style("cursor","pointer")
+      .on("click",()=>dashDrill(isActive?{}:{project:p}))
+      .on("mousemove",ev=>dtip.show(`<b style="color:var(--phos)">${esc(p)}</b> · $${fmt(v)}<br><span style="color:var(--dim)">${Math.round(100*v/Math.max(total,0.01))}% of all · click to ${isActive?"reset":"drill down"}</span>`,ev))
+      .on("mouseleave",()=>dtip.hide());
+    svg.append("text").attr("x",m.l+x(v)+6).attr("y",y(p)+y.bandwidth()/2+3)
+      .attr("fill","#cdd6e4").style("font-size","10px").text("$"+fmt(v));
+  });
+}
+
+/* ── export ── */
+async function exportThread(id,fmt){
+  const r=await api("/api/export",{id,fmt});
+  if(r.error){alert(r.error);return}
+  const blob=new Blob([r.content],{type:fmt==="html"?"text/html":"text/markdown"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);a.download=r.filename;a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/* ── settings tab (keys + facts) ── */
+async function loadSettings(){
+  const cfg=await api("/api/settings");
+  const facts=await api("/api/facts");
+  const dot=ok=>`<span style="color:${ok?"var(--green)":"var(--ember)"}">●</span>`;
+  $("#view-settings").innerHTML=`
+  <div class="genwrap" style="margin-bottom:18px">
+    <b style="color:var(--phos)">Provider API keys</b>
+    <i class="info" data-tip="Keys are written to fable/.env (chmod 600, gitignored, never leaves this machine). claude-cli needs no key — it uses your installed Claude Code login (Max/Pro subscription quota)."></i>
+    <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;align-items:center">
+      ${dot(cfg.providers.openrouter)} openrouter
+      <input id="set-or" type="password" placeholder="${cfg.openrouter_key===false?"sk-or-v1-…":"saved: "+esc(cfg.openrouter_key)}" style="flex:1;min-width:200px;background:var(--ink3);border:1px solid var(--line);color:var(--text);padding:7px 10px;border-radius:4px">
+      ${dot(cfg.providers.anthropic)} anthropic
+      <input id="set-an" type="password" placeholder="${cfg.anthropic_key===false?"sk-ant-…":"saved: "+esc(cfg.anthropic_key)}" style="flex:1;min-width:200px;background:var(--ink3);border:1px solid var(--line);color:var(--text);padding:7px 10px;border-radius:4px">
+      ${dot(cfg.providers["claude-cli"])} claude-cli
+      <button class="ghost" onclick="saveSettings()">save keys</button>
+    </div>
+  </div>
+  <div class="genwrap" style="margin-bottom:18px">
+    <b style="color:var(--phos)">Remembered facts</b>
+    <i class="info" data-tip="Durable cross-session memory: each fact is auto-injected at the start of every future Claude Code session (SessionStart hook). Add facts here, with 'fable remember' in the shell, or by telling Claude 'remember that…' (fable_remember MCP tool)."></i>
+    <div id="factlist" style="margin-top:8px">${facts.map(f=>
+      `<div style="padding:3px 0;color:var(--dim)">#${f.id} ${f.project?"["+esc(f.project)+"]":"[global]"} ${esc(f.fact)}
+       <span class="bf-btn" onclick="forgetFact(${f.id})">forget</span></div>`).join("")||'<span class="hint">none yet</span>'}</div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <input id="newfact" placeholder="we use uv, never pip…" style="flex:1;background:var(--ink3);border:1px solid var(--line);color:var(--text);padding:7px 10px;border-radius:4px">
+      <input id="newfact-proj" placeholder="project (optional)" style="width:140px;background:var(--ink3);border:1px solid var(--line);color:var(--text);padding:7px 10px;border-radius:4px">
+      <button class="ghost" onclick="addFact()">remember</button>
+    </div>
+  </div>
+  <div class="hint">claude-cli provider needs NO key — it uses your machine's Claude Code login (Max/Pro subscription). env file: ${esc(cfg.env_path)}</div>`;
+}
+
+/* ── stats tab ── */
+async function loadStats(){
+  const s=await api("/api/stats");
+  $("#view-stats").innerHTML=`
+  <div class="statgrid">${[
+    ["records (best copies)",fmt(s.records)],["all copies",fmt(s.copies)],
+    ["threads",fmt(s.threads)],["sessions",fmt(s.sessions)],
+    ["cards",fmt(s.cards)],["terms",fmt(s.terms)],
+    ["vault files",fmt(s.files)],["citations",fmt(s.citations)],
+    ["index size",fmt(s.db_bytes)+"B"],["vault size",fmt(s.vault_bytes)+"B"],
+  ].map(([k,v])=>`<div class="stat"><div class="v">${v}</div><div class="k">${k}</div></div>`).join("")}
+  </div>
+  <div class="hint" style="margin-top:18px">card types: ${Object.entries(s.card_types||{}).map(([k,v])=>`${k}=${v}`).join(" · ")||"none"}</div>`;
+}
+if(location.hash.length>1)try{showTab(location.hash.slice(1))}catch(e){}
+</script>
+</body>
+</html>
