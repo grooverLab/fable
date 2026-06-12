@@ -184,6 +184,61 @@ def known_files(db_path: str, query: str = "", limit: int = 40) -> List[dict]:
         conn.close()
 
 
+def session_files(db_path: str, session_id: str) -> List[dict]:
+    """Every file edited in one session, with per-file analytics —
+    the Files tab's card grid when a transcript is selected."""
+    conn = fdb.connect(db_path)
+    try:
+        rows = conn.execute("""
+            SELECT r.uuid, r.ts, r.prompt_id, f.path, r.offset, r.length
+            FROM records r JOIN files f ON f.id = r.file_id
+            WHERE r.session_id = ? AND r.block_kinds LIKE '%tool_use%'
+            ORDER BY r.ts_epoch""", (session_id,)).fetchall()
+        agg = {}
+        for uuid, ts, prompt_id, fpath, offset, length in rows:
+            try:
+                obj = json.loads(read_span(fpath, offset, length)
+                                 .decode("utf-8", "surrogateescape"))
+            except (OSError, ValueError):
+                continue
+            msg = obj.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not (isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and block.get("name") in EDIT_TOOLS):
+                    continue
+                inp = block.get("input")
+                if not isinstance(inp, dict):
+                    continue
+                target = inp.get("file_path") or inp.get("path")
+                if not target:
+                    continue
+                a = agg.setdefault(target, {
+                    "path": target, "edits": 0, "writes": 0,
+                    "first_ts": ts, "last_ts": ts, "threads": set(),
+                    "last_tool": block["name"]})
+                if block["name"] == "Write":
+                    a["writes"] += 1
+                else:
+                    a["edits"] += 1
+                a["last_ts"] = ts or a["last_ts"]
+                a["last_tool"] = block["name"]
+                if prompt_id:
+                    a["threads"].add(prompt_id)
+        out = []
+        for a in agg.values():
+            a["threads"] = len(a["threads"])
+            a["total"] = a["edits"] + a["writes"]
+            out.append(a)
+        out.sort(key=lambda x: -x["total"])
+        return out
+    finally:
+        conn.close()
+
+
 def cmd_file(args) -> int:
     events = file_events(args.db, args.path)
     if not events:

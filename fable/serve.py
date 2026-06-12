@@ -530,6 +530,12 @@ def api_fileversion(db_path, params):
             "note": v["note"], "ts": v["ts"], "tool": v["tool"]}
 
 
+def api_sessionfiles(db_path, params):
+    from fable.filetime import session_files
+    session = (params.get("session") or [""])[0]
+    return session_files(db_path, session)
+
+
 def api_export(db_path, params):
     from fable.export import export_thread_md, export_thread_html
     prompt_id = (params.get("id") or [""])[0]
@@ -770,6 +776,7 @@ ROUTES["/api/files"] = api_files
 ROUTES["/api/filehist"] = api_filehist
 ROUTES["/api/filediff"] = api_filediff
 ROUTES["/api/fileversion"] = api_fileversion
+ROUTES["/api/sessionfiles"] = api_sessionfiles
 ROUTES["/api/facts"] = api_facts
 
 def post_prune_plan(db_path, body):
