@@ -24,8 +24,10 @@ class StaleIndexError(RuntimeError):
 
 
 def _check_fresh(conn, paths) -> None:
-    """A pointer into a file that changed since indexing is garbage —
-    refuse to serve it as memory."""
+    """A pointer into a REWRITTEN file is garbage — refuse to serve it.
+    But transcripts are append-only between prunes: a file that merely GREW
+    still holds every indexed offset intact, so reads stay valid (the
+    active session would otherwise be permanently 'stale')."""
     for path in set(paths):
         row = conn.execute(
             "SELECT size, mtime FROM files WHERE path = ?", (path,)).fetchone()
@@ -36,6 +38,8 @@ def _check_fresh(conn, paths) -> None:
                 f"indexed file is gone: {path} — re-run `fable index`")
             err.path = path
             raise err
+        if row and st.st_size > row[0]:
+            continue  # append-only growth: indexed offsets are all valid
         if row and (row[0] != st.st_size or abs(row[1] - st.st_mtime) > 1e-6):
             err = StaleIndexError(
                 f"{path} changed since it was indexed — re-run "
@@ -226,11 +230,13 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
            target: Optional[str] = None, limit: int = 10,
            sort: str = "relevance", kind: Optional[str] = None,
            model: Optional[str] = None,
-           project: Optional[str] = None) -> List[dict]:
+           project: Optional[str] = None,
+           session: Optional[str] = None) -> List[dict]:
     """kind: 'main' | 'subagent' (majority-sidechain threads);
-    model/project: substring match; sort: relevance|turns|tokens|recent."""
+    model/project: substring match; session: exact session scope;
+    sort: relevance|turns|tokens|recent."""
     fts_query = _fts_query(query)
-    has_filters = any([operative, target, kind, model, project])
+    has_filters = any([operative, target, kind, model, project, session])
     if fts_query is None and not has_filters and sort == "relevance":
         return []
     conn = fdb.connect(db_path)
@@ -317,6 +323,9 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
         if project:
             results = [h for h in results
                        if project.lower() in (h["project"] or "").lower()]
+        if session:
+            results = [h for h in results
+                       if (h["session_id"] or "").startswith(session)]
         results.sort(key=SORT_KEYS.get(sort, SORT_KEYS["relevance"]),
                      reverse=(sort == "recent"))
         fdb.log_op(db_path, "search", q=query or "", hits=len(results[:limit]))

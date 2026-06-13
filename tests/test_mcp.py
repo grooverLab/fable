@@ -53,7 +53,7 @@ class TestMcpServer(unittest.TestCase):
         names = {t["name"] for t in by_id[2]["result"]["tools"]}
         self.assertEqual(names, {"fable_search", "fable_thread",
                                  "fable_block", "fable_context",
-                                 "fable_remember"})
+                                 "fable_remember", "fable_prune"})
         hits = json.loads(by_id[3]["result"]["content"][0]["text"])
         self.assertEqual(hits[0]["prompt_id"], "p1")
         self.assertIn("fix the zigzag pivot detection",

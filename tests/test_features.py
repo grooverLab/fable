@@ -23,7 +23,7 @@ def corpus(dirpath):
     objs = []
     # p1: main-agent zigzag work (model: sonnet)
     a = rec("a", "p1", None, "user", "2026-06-01T00:00:01Z",
-            text="fix the zigzag pivot detection logic")
+            text="fix the zigzag pivot detection logic in sled-zigzag")
     b = rec("b", "p1", "a", "assistant", "2026-06-01T00:00:02Z",
             text="fixed the zigzag pivot scan")
     b["message"]["model"] = "claude-sonnet-4-6"

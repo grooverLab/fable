@@ -1,8 +1,19 @@
 <div align="center">
 
-# fable
+# fable Recall
 
 ## Your Claude already has a memory. fable unlocks it.
+
+[**Quickstart**](#fable-is-the-memory) · [**Why fable**](#why-fable--and-not-the-alternatives) · [**Benchmarks**](#how-it-works) · [**Roadmap**](ROADMAP.md) · [**Discussions**](../../discussions)
+
+![MIT](https://img.shields.io/badge/license-MIT-ffb454?style=flat-square) ![stdlib only](https://img.shields.io/badge/dependencies-zero-7dd87d?style=flat-square) ![tests](https://img.shields.io/badge/tests-160%20passing-7dd87d?style=flat-square) ![local first](https://img.shields.io/badge/your%20data-never%20leaves%20your%20machine-6cc7d9?style=flat-square)
+
+<table><tr>
+<td width="50%"><img src="demo/shots/search.png" alt="search your entire Claude Code history"/></td>
+<td width="50%"><img src="demo/shots/dashboard.png" alt="usage analytics dashboard"/></td>
+</tr><tr>
+<td colspan="2"><img src="demo/shots/compose.png" alt="compose new sessions from old threads"/></td>
+</tr></table>
 
 </div>
 
@@ -119,9 +130,7 @@ API-equivalent work in the author's archive included.
 Try it on a fictional sample first:
 `python3 demo/seed_demo.py && fable --db demo/demo.db serve`
 
-| | |
-|---|---|
-| ![search](demo/shots/search.png) | ![dashboard](demo/shots/dashboard.png) |
+
 
 ---
 

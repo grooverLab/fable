@@ -64,6 +64,28 @@ TOOLS = [
         },
     },
     {
+        "name": "fable_prune",
+        "description": ("Slim a session transcript NOW (tool noise, "
+                        "images, bloat) with a vault backup sealed first — "
+                        "nothing is lost, everything stays recallable. Use "
+                        "when the user asks to prune/slim a session or "
+                        "complains about context size. After pruning the "
+                        "CURRENT session, tell the user to /exit and run "
+                        "the returned resume command to load the slim "
+                        "version."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description":
+                               "session to prune (the current session's id "
+                               "works — the rewrite is atomic and "
+                               "append-safe)"},
+                "strip_images": {"type": "boolean", "default": True},
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
         "name": "fable_remember",
         "description": ("Store a durable fact the user wants remembered "
                         "across all future sessions (auto-injected at "
@@ -118,6 +140,37 @@ def _call_tool(db_path, name, args):
     if name == "fable_block":
         from fable.recall import get_block
         return get_block(db_path, args["uuid"])
+    if name == "fable_prune":
+        import json as _json
+        import os as _os
+        from pathlib import Path as _P
+        from fable import db as _fdb
+        from fable.discover import DEFAULT_BACKUP_ROOTS, project_label
+        from fable.prune import prune_file
+        sid = args["session_id"]
+        conn = _fdb.connect(db_path)
+        row = conn.execute(
+            "SELECT live_path FROM sessions WHERE session_id LIKE ?",
+            (sid + "%",)).fetchone()
+        conn.close()
+        if not row or not row[0] or not _os.path.exists(row[0]):
+            raise KeyError(f"no live transcript known for session {sid}")
+        live = row[0]
+        before = _os.path.getsize(live)
+        project = project_label(_os.path.basename(_os.path.dirname(live)))
+        root = next((r for r in DEFAULT_BACKUP_ROOTS if _os.path.isdir(r)),
+                    str(_P(db_path).parent / "backups"))
+        report = prune_file(live, "resume",
+                            backup_dir=_P(root) / project, replace=True,
+                            strip_images=bool(args.get("strip_images", True)),
+                            db_path=db_path, force=True)
+        return _json.dumps({
+            "before_bytes": before, "after_bytes": _os.path.getsize(live),
+            "backup": report.get("backup"),
+            "chain_valid": report.get("chain_valid"),
+            "resume": f"claude --resume {row[0].rsplit('/', 1)[-1][:-6]}",
+            "note": "if this is the CURRENT session: /exit first, then run "
+                    "the resume command to load the slim transcript"})
     if name == "fable_remember":
         from fable.facts import add_fact
         fid = add_fact(db_path, args["fact"], project=args.get("project"))

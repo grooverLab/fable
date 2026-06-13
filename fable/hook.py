@@ -112,13 +112,113 @@ def _post_tool(payload):
     return {"ok": True}
 
 
+CONTEXT_WINDOW = 200_000
+AUTOPRUNE_COOLDOWN = 1800     # never twice within 30 min
+AUTOPRUNE_MIN_BYTES = 2_000_000
+
+
+def _context_pct(transcript: str) -> float:
+    """Current context fill, estimated from the last assistant message's
+    usage block (cumulative input + cache tokens ≈ what the model holds)."""
+    try:
+        size = os.path.getsize(transcript)
+        with open(transcript, "rb") as f:
+            f.seek(max(0, size - 300_000))
+            tail = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return 0.0
+    for line in reversed(tail):
+        if '"usage"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        msg = obj.get("message")
+        usage = msg.get("usage") if isinstance(msg, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        ctx = ((usage.get("input_tokens") or 0)
+               + (usage.get("cache_read_input_tokens") or 0)
+               + (usage.get("cache_creation_input_tokens") or 0))
+        if ctx:
+            return 100.0 * ctx / CONTEXT_WINDOW
+    return 0.0
+
+
+def _auto_prune(db_path: str, payload: dict):
+    """When enabled (Settings tab), prune the live transcript automatically
+    once context crosses the configured threshold — and tell the user how
+    to resume into the slim session."""
+    import time as _t
+    transcript = payload.get("transcript_path")
+    session = payload.get("session_id") or ""
+    if not transcript or not os.path.exists(transcript):
+        return None
+    try:
+        from fable import db as fdb
+        conn = fdb.connect(db_path)
+    except FileNotFoundError:
+        return None
+    try:
+        cfg = dict(conn.execute(
+            "SELECT key, value FROM meta WHERE key IN "
+            "('autoprune_enabled','autoprune_pct')").fetchall())
+        if cfg.get("autoprune_enabled") != "1":
+            return None
+        threshold = float(cfg.get("autoprune_pct") or 80)
+        row = conn.execute("SELECT value FROM meta WHERE key = ?",
+                           (f"autoprune_last:{session}",)).fetchone()
+        if row and _t.time() - float(row[0]) < AUTOPRUNE_COOLDOWN:
+            return None
+    finally:
+        conn.close()
+
+    if os.path.getsize(transcript) < AUTOPRUNE_MIN_BYTES:
+        return None
+    pct = _context_pct(transcript)
+    if pct < threshold:
+        return None
+
+    from fable.discover import DEFAULT_BACKUP_ROOTS, project_label
+    from fable.prune import prune_file
+    before = os.path.getsize(transcript)
+    project = project_label(os.path.basename(os.path.dirname(transcript)))
+    backup_root = next((r for r in DEFAULT_BACKUP_ROOTS if os.path.isdir(r)),
+                       str(Path(db_path).parent / "backups"))
+    try:
+        prune_file(transcript, "resume",
+                   backup_dir=Path(backup_root) / project,
+                   replace=True, strip_images=True,
+                   db_path=db_path, force=True)
+    except Exception as e:
+        _log(db_path, f"autoprune failed: {e}")
+        return None
+    after = os.path.getsize(transcript)
+    conn = fdb.connect(db_path)
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                 (f"autoprune_last:{session}", str(_t.time())))
+    conn.commit()
+    conn.close()
+    fdb.log_op(db_path, "autoprune", session=session, pct=round(pct, 1),
+               before=before, after=after)
+    return (f"fable auto-prune: context at {pct:.0f}% — transcript slimmed "
+            f"{before / 1e6:.1f}MB → {after / 1e6:.1f}MB (vault backup "
+            f"sealed; nothing lost). To load the slim session: /exit then "
+            f"`claude --resume {session}`")
+
+
 def run_hook(db_path: str, payload: dict) -> dict:
     transcript = payload.get("transcript_path")
     event = payload.get("hook_event_name", "?")
     session = payload.get("session_id", "?")
 
     if event == "PostToolUse":
-        return _post_tool(payload)
+        result = _post_tool(payload)
+        msg = _auto_prune(db_path, payload)
+        if msg:
+            result["system_message"] = msg
+        return result
     if event == "UserPromptSubmit":
         # the user may have edited tracked files in their IDE while Claude
         # was idle — sweep for silent changes before the next turn begins
@@ -215,6 +315,8 @@ def cmd_hook(args) -> int:
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": "SessionStart",
                 "additionalContext": result["inject"]}}))
+        elif result.get("system_message"):
+            print(json.dumps({"systemMessage": result["system_message"]}))
         _log(args.db, json.dumps({"payload_event":
                                   payload.get("hook_event_name"),
                                   **{k: v for k, v in result.items()

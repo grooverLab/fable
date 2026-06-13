@@ -337,7 +337,7 @@ button.danger:hover{background:#ff8557}
 </div>
 <div class="app">
   <header>
-    <div class="wordmark">fable<span class="tail">·recall</span></div>
+    <div class="wordmark">fable<span class="tail">·Recall</span></div>
     <div class="tagline">transcript memory engine</div>
     <div id="statsbar"></div>
   </header>
@@ -399,6 +399,7 @@ button.danger:hover{background:#ff8557}
         </select>
         <select id="f-model"><option value="">model: all</option></select>
         <select id="f-project"><option value="">project: all</option></select>
+        <select id="f-scope" title="scope results to the sidebar-selected transcript"><option value="">scope: everywhere</option></select>
         <i class="info" style="align-self:center" data-tip="Filters work with OR without a query: with one they refine the search; with the search box empty they BROWSE all threads (sorted by your sort choice). agent=subagent shows threads dominated by sidechain (Task-tool) records; model comes from each assistant record's own metadata."></i>
       </div>
       <div class="hint">facets intersect · click a result to page the raw thread back in · PACK copies a budgeted multi-thread context block · empty search + filters = browse mode</div>
@@ -580,6 +581,13 @@ function setSelection(project,session){
   if(SEL.session&&ss&&[...ss.options].some(o=>o.value===SEL.session))ss.value=SEL.session;
   const anchor=$("#bk-anchor");
   if(anchor)anchor.textContent="→ "+(SEL.session?SEL.session.slice(0,8):SEL.project||"pick a session");
+  // search scope select mirrors the selected transcript
+  const fs=$("#f-scope");
+  if(fs){
+    fs.innerHTML='<option value="">scope: everywhere</option>'
+      +(SEL.session?`<option value="${esc(SEL.session)}">scope: this transcript (${esc(SEL.session.slice(0,8))})</option>`:"");
+    if(SEL.session)fs.value=SEL.session;   // default to the selection
+  }
 }
 async function openSession(sid,el){
   document.querySelectorAll(".sess a").forEach(a=>a.classList.remove("active"));
@@ -613,7 +621,8 @@ function searchParams(){
   return {q:$("#q").value.trim(),op:$("#f-op").value.trim(),
     target:$("#f-target").value.trim(),sort:$("#f-sort").value,
     kind:$("#f-kind").value,model:$("#f-model").value.trim(),
-    project:$("#f-project").value.trim()};
+    project:$("#f-project").value.trim(),
+    session:$("#f-scope").value.trim()};
 }
 api("/api/facets").then(f=>{
   (f.models||[]).forEach(m=>{const o=document.createElement("option");
@@ -625,7 +634,7 @@ api("/api/facets").then(f=>{
 });
 async function doSearch(){
   const p=searchParams();
-  if(!p.q&&!(p.op||p.target||p.kind||p.model||p.project))return;
+  if(!p.q&&!(p.op||p.target||p.kind||p.model||p.project||p.session))return;
   showTab("search");currentThread=null;
   $("#results").innerHTML='<div class="loading">recalling…</div>';
   const hits=await api("/api/search",searchParams());
@@ -633,7 +642,7 @@ async function doSearch(){
   $("#results").innerHTML=hits.length?hits.map(hitHtml).join("")
     :'<div class="empty"><span class="big">nothing surfaced</span>try broader words — FTS is OR-ranked</div>';
 }
-["f-sort","f-kind","f-model","f-project"].forEach(id=>
+["f-sort","f-kind","f-model","f-project","f-scope"].forEach(id=>
   $("#"+id).addEventListener("change",doSearch));
 $("#f-op").addEventListener("change",doSearch);
 $("#pack").onclick=async()=>{
@@ -781,9 +790,13 @@ async function showDiff(uuid,fileIds){
 
 /* ── memory graph ── */
 let graphLoaded=false;
+let graphInflight=false;
 async function loadGraph(force){
   if(graphLoaded&&!force)return;
+  if(graphInflight)return;       // single-flight: racing draws stack nodes
+  graphInflight=true;
   graphLoaded=true;
+  try{
   const sel=$("#g-session");
   if(sel.options.length<=1){
     const projects=await api("/api/projects");
@@ -794,25 +807,77 @@ async function loadGraph(force){
     }));
   }
   const data=await api("/api/graph",{session:sel.value,cap:120});
+  GRAPH_DATA=data;
+  ensureGraphToggles();
   drawGraph(data);
+  }finally{graphInflight=false;}
 }
 $("#g-reload")&&($("#g-reload").onclick=()=>loadGraph(true));
 document.addEventListener("change",e=>{if(e.target.id==="g-session")loadGraph(true)});
-function drawGraph(data){
+let GRAPH_DATA=null;
+const GRAPH_ON={file:true,topic:true,wikilink:true,semantic:true,citation:true};
+const GCOLOR={thread:"#ffb454",file:"#6cc7d9",topic:"#7dd87d",wikilink:"#b48ce0"};
+function ensureGraphToggles(){
+  if($("#g-toggles"))return;
+  const bar=document.createElement("div");
+  bar.id="g-toggles";
+  bar.style.cssText="display:flex;gap:14px;align-items:center;margin:6px 0 8px;font-size:11px;color:var(--dim)";
+  bar.innerHTML=["file","topic","wikilink","semantic","citation"].map(k=>
+    `<label style="cursor:pointer;display:flex;align-items:center;gap:4px">
+       <input type="checkbox" checked data-gt="${k}">
+       <span style="color:${GCOLOR[k]||"var(--ember)"}">${k==="semantic"?"~ semantic":k==="citation"?"→ citation":"● "+k}</span></label>`).join("")
+    +`<span style="margin-left:auto">click: thread opens · file → time-travel · topic → search</span>`;
+  const svg=document.getElementById("graphsvg");
+  svg.parentNode.insertBefore(bar,svg);
+  bar.addEventListener("change",e=>{
+    const k=e.target.dataset.gt;if(!k)return;
+    GRAPH_ON[k]=e.target.checked;
+    if(GRAPH_DATA)drawGraph(GRAPH_DATA);
+  });
+}
+function drawGraph(raw){
+  // apply node-type + edge-type toggles, then drop newly isolated nodes
+  const nodeOk=n=>n.group==="thread"||GRAPH_ON[n.group];
+  let nodes=raw.nodes.filter(nodeOk).map(n=>Object.assign({},n));
+  const ids=new Set(nodes.map(n=>n.id));
+  const links=raw.links.filter(l=>{
+    const s=l.source.id||l.source,t=l.target.id||l.target;
+    return GRAPH_ON[l.kind]!==false&&ids.has(s)&&ids.has(t);
+  }).map(l=>Object.assign({},l,{source:l.source.id||l.source,target:l.target.id||l.target}));
+  const linked=new Set();
+  links.forEach(l=>{linked.add(l.source);linked.add(l.target)});
+  nodes=nodes.filter(n=>linked.has(n.id));
+  const data={nodes,links};
   const svg=d3.select("#graphsvg");svg.selectAll("*").remove();
   const W=svg.node().clientWidth,H=svg.node().clientHeight;
   const g=svg.append("g");
   svg.call(d3.zoom().scaleExtent([.2,5]).on("zoom",e=>g.attr("transform",e.transform)));
-  const color={thread:"#ffb454",concept:"#8a6a3a",target:"#6b7689",wikilink:"#6cc7d9"};
+  const color=GCOLOR;
+  // hub-aware physics: high-degree nodes (a file 30 threads touched) must
+  // not drag the whole graph to the middle — normalize pull by degree
+  const deg={};
+  data.links.forEach(l=>{deg[l.source]=(deg[l.source]||0)+1;deg[l.target]=(deg[l.target]||0)+1});
+  const R=d=>d.group==="thread"?Math.min(16,5+Math.sqrt((d.tokens||10)/60)):4+Math.min(8,(d.df||1));
   const sim=d3.forceSimulation(data.nodes)
     .force("link",d3.forceLink(data.links).id(d=>d.id)
-      .distance(l=>l.kind==="citation"?60:90).strength(l=>Math.min(.9,(l.weight||1)/20)))
-    .force("charge",d3.forceManyBody().strength(-120))
-    .force("center",d3.forceCenter(W/2,H/2))
-    .force("collide",d3.forceCollide(14));
+      .distance(l=>l.kind==="citation"?70:l.kind==="semantic"?90:120)
+      .strength(l=>{
+        const s=1/Math.min(deg[l.source.id||l.source]||1,deg[l.target.id||l.target]||1);
+        return l.kind==="semantic"?Math.min(.4,s):Math.min(.7,s);}))
+    .force("charge",d3.forceManyBody()
+      .strength(d=>d.group==="thread"?-220:-70).distanceMax(360))
+    .force("x",d3.forceX(W/2).strength(.05))
+    .force("y",d3.forceY(H/2).strength(.07))
+    .force("collide",d3.forceCollide(d=>R(d)+9).iterations(2));
   const link=g.append("g").selectAll("line").data(data.links).join("line")
-    .attr("stroke",l=>l.kind==="citation"?"#ff6b35":"#232a35")
-    .attr("stroke-width",l=>l.kind==="citation"?1.6:Math.min(3,.4+(l.weight||1)/10));
+    .attr("stroke",l=>l.kind==="citation"?"#ff6b35":
+                     l.kind==="semantic"?"#6cc7d9":
+                     l.kind==="topic"?"#3c5a3c":"#2c3a48")
+    .attr("stroke-dasharray",l=>l.kind==="semantic"?"4 3":null)
+    .attr("stroke-opacity",l=>l.kind==="semantic"?.8:.9)
+    .attr("stroke-width",l=>l.kind==="citation"?1.6:
+                            l.kind==="semantic"?1.4:
+                            Math.min(3,.4+(l.weight||1)/10));
   const tip=d3.select("body").append("div").attr("class","gtip").style("display","none");
   const node=g.append("g").selectAll("circle").data(data.nodes).join("circle")
     .attr("class","gnode")
@@ -823,11 +888,18 @@ function drawGraph(data){
     .on("mouseover",(e,d)=>tip.style("display","block")
       .html(d.group==="thread"
         ?`<b>${esc(d.label)}</b><br>${d.turns||"?"} turns · ~${fmt(d.tokens)} tok · ${esc(d.type||"")}`
-        :`<b>[[${esc(d.label)}]]</b><br>${esc(d.group)} · in ${d.df} threads`))
+        :`<b>${esc(d.label)}</b><br>${esc(d.group)} · in ${d.df||"?"} threads`
+         +(d.group==="file"?"<br>click → file time-travel":"")))
     .on("mousemove",e=>tip.style("left",(e.clientX+14)+"px").style("top",(e.clientY+8)+"px"))
     .on("mouseout",()=>tip.style("display","none"))
     .on("click",(e,d)=>{
+      tip.style("display","none");
       if(d.group==="thread")openThread(d.id);
+      else if(d.group==="file"){
+        showTab("files");
+        const q=d.full||d.path||d.label;
+        setTimeout(()=>{$("#ft-q").value=q;ftHist(q)},150);
+      }
       else{$("#q").value=d.label;showTab("search");doSearch();}
     })
     .call(d3.drag()
@@ -836,8 +908,17 @@ function drawGraph(data){
       .on("end",(e,d)=>{if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null}));
   const label=g.append("g").selectAll("text")
     .data(data.nodes.filter(d=>d.group!=="thread"||d.tokens>800)).join("text")
-    .attr("class","glabel").text(d=>d.label.length>26?d.label.slice(0,25)+"…":d.label);
+    .attr("class","glabel").text(d=>{const t=String(d.label||d.id||"");return t.length>26?t.slice(0,25)+"…":t});
   sim.on("tick",()=>{
+    // soft containment: nothing escapes the viewport; NaN/zero-size
+    // measurements can never stack the graph into a single point
+    const BW=Math.max(W,400),BH=Math.max(H,300);
+    data.nodes.forEach((d,i)=>{
+      if(!isFinite(d.x))d.x=BW/2+(i%17-8)*24;
+      if(!isFinite(d.y))d.y=BH/2+(Math.floor(i/17)%11-5)*24;
+      d.x=Math.max(18,Math.min(BW-18,d.x));
+      d.y=Math.max(18,Math.min(BH-18,d.y));
+    });
     link.attr("x1",l=>l.source.x).attr("y1",l=>l.source.y)
         .attr("x2",l=>l.target.x).attr("y2",l=>l.target.y);
     node.attr("cx",d=>d.x).attr("cy",d=>d.y);
@@ -1082,6 +1163,14 @@ async function saveSettings(){
   const r=await fetch("/api/settings",{method:"POST",
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify(body)}).then(x=>x.json());
+  if(r.error)alert(r.error);else loadSettings();
+}
+async function saveAutoPrune(){
+  const r=await fetch("/api/settings",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({autoprune_enabled:$("#ap-on").checked,
+                         autoprune_pct:+$("#ap-pct").value||80})})
+    .then(x=>x.json());
   if(r.error)alert(r.error);else loadSettings();
 }
 async function addFact(){
@@ -1395,7 +1484,8 @@ async function ftHist(path){
   FT_PATH=path;
   $("#ft-out").innerHTML='<div class="loading">replaying every edit…</div>';
   const h=await api("/api/filehist",{path});
-  FT_VERS=h.versions;
+  if(h.error){$("#ft-out").innerHTML=`<div class="warnbox">${esc(h.error)}</div>`;return}
+  FT_VERS=h.versions||[];
   if(!FT_VERS.length){$("#ft-out").innerHTML='<div class="empty">no Edit/Write history for this exact path</div>';return}
   // analytics
   const sess=new Set(FT_VERS.map(v=>v.session_id)),writes=FT_VERS.filter(v=>v.tool==="Write").length;
@@ -1404,6 +1494,7 @@ async function ftHist(path){
   const opts=FT_VERS.map((v,i)=>`<option value="${i}" ${v.ok?"":"disabled"}>v${i}${v.ok?(v.derived?" ◐":""):" ○"} · ${(v.ts||"?").slice(5,16)} · ${v.tool}</option>`).join("");
   $("#ft-out").innerHTML=`
     <div class="genwrap" style="margin-bottom:12px">
+      <button class="ghost" style="float:right" onclick="ftBack()">← files</button>
       <b style="color:var(--phos)">${esc(path)}</b>
       <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:11.5px;color:var(--dim);align-items:center">
         <span><b style="color:var(--phos)">${FT_VERS.length}</b> versions</span>
@@ -1416,8 +1507,8 @@ async function ftHist(path){
       <div style="display:flex;gap:10px;margin-top:10px;align-items:center;flex-wrap:wrap">
         <select id="ft-a" class="facet" style="width:auto">${opts}</select> ⇄
         <select id="ft-b" class="facet" style="width:auto">${opts}</select>
-        <button onclick="ftPanes()">SIDE BY SIDE</button>
-        <button class="ghost" onclick="ftDiff()">unified diff</button>
+        <button id="ft-bt-p" onclick="ftPanes()">side by side</button>
+        <button id="ft-bt-d" class="ghost" onclick="ftDiff()">unified diff</button>
       </div>
     </div>
     <div id="ft-panes"></div>
@@ -1430,17 +1521,40 @@ async function ftHist(path){
   const last=FT_VERS.map((v,i)=>v.ok?i:-1).filter(i=>i>=0);
   if(last.length){$("#ft-a").value=String(last[0]);$("#ft-b").value=String(last[last.length-1])}
 }
+function ftBack(){
+  if(SEL.session)ftSession(SEL.session);
+  else{$("#ft-out").innerHTML="";ftSearch&&$("#ft-q").value&&ftSearch()}
+}
+function ftBtn(active){
+  const p=$("#ft-bt-p"),d=$("#ft-bt-d");
+  if(!p||!d)return;
+  p.classList.toggle("ghost",active!=="p");
+  d.classList.toggle("ghost",active!=="d");
+}
 async function ftPanes(){
   const a=$("#ft-a").value,b=$("#ft-b").value;
-  $("#ft-panes").innerHTML='<div class="loading">reconstructing both versions…</div>';
-  const [va,vb]=await Promise.all([api("/api/fileversion",{path:FT_PATH,i:a}),
-                                   api("/api/fileversion",{path:FT_PATH,i:b})]);
-  const pane=(v,i)=>`<div class="genwrap" style="min-width:0">
-      <b style="color:var(--cyan)">v${i}</b> <span class="hint">${(v.ts||"?").slice(0,19)} · ${v.tool}</span>
-      <pre class="thread" style="max-height:55vh;margin-top:8px;font-size:11px">${v.content==null?'<span style="color:var(--ember)">not reconstructable — '+esc(v.note||"inputs pruned")+'</span>':esc(v.content)}</pre></div>`;
-  $("#ft-panes").innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">${pane(va,a)}${pane(vb,b)}</div>`;
+  ftBtn("p");
+  $("#ft-panes").innerHTML='<div class="loading">diffing versions…</div>';
+  const r=await api("/api/filediff2",{path:FT_PATH,a,b});
+  if(r.error){$("#ft-panes").innerHTML=`<div class="warnbox">${esc(r.error)}</div>`;return}
+  // collapse long unchanged runs so the changes pop
+  const rows=[];let eq=[];
+  const flush=()=>{if(eq.length>10){rows.push(...eq.slice(0,3),{gap:eq.length-6},...eq.slice(-3))}else rows.push(...eq);eq=[]};
+  r.rows.forEach(x=>{x.op==="eq"?eq.push(x):(flush(),rows.push(x))});
+  flush();
+  const BG={delete:["rgba(255,93,93,.14)",""],insert:["","rgba(125,216,125,.14)"],
+            replace:["rgba(255,93,93,.10)","rgba(125,216,125,.10)"],eq:["",""]};
+  const cell=(t,ln,bg)=>`<td style="color:var(--faint);text-align:right;padding:0 6px;min-width:34px;user-select:none;vertical-align:top">${ln??""}</td>
+      <td style="white-space:pre-wrap;word-break:break-all;padding:0 8px;${bg?"background:"+bg:""};width:46%">${t==null?"":esc(t)}</td>`;
+  const body=rows.map(x=>x.gap
+    ?`<tr><td colspan="4" style="text-align:center;color:var(--faint);padding:5px;border-top:1px dashed var(--line);border-bottom:1px dashed var(--line)">··· ${x.gap} unchanged lines ···</td></tr>`
+    :`<tr>${cell(x.a,x.al,BG[x.op][0])}${cell(x.b,x.bl,BG[x.op][1])}</tr>`).join("");
+  $("#ft-panes").innerHTML=`<div class="genwrap" style="overflow:auto;max-height:62vh;padding:8px">
+    <div class="hint" style="margin-bottom:6px"><b style="color:var(--red)">red</b> = removed in v${a} → <b style="color:var(--green)">green</b> = added by v${b}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:11px;font-family:var(--mono);table-layout:fixed">${body}</table></div>`;
 }
 async function ftDiff(){
+  ftBtn("d");
   const a=$("#ft-a").value,b=$("#ft-b").value;
   const r=await api("/api/filediff",{path:FT_PATH,a,b});
   if(r.error){openModal("diff failed","",`<div class="warnbox" style="margin:0">${esc(r.error)}</div>`);return}
@@ -1493,7 +1607,16 @@ async function loadSettings(){
       <button class="ghost" onclick="addFact()">remember</button>
     </div>
   </div>
-  <div class="hint">claude-cli provider needs NO key — it uses your machine's Claude Code login (Max/Pro subscription). env file: ${esc(cfg.env_path)}</div>`;
+  <div class="hint">claude-cli provider needs NO key — it uses your machine's Claude Code login (Max/Pro subscription). env file: ${esc(cfg.env_path)}</div>
+  <div style="border:1px solid var(--line);border-radius:6px;padding:14px 16px;margin-top:14px">
+    <div style="font:600 14px var(--serif);color:var(--phos);margin-bottom:8px">auto-prune
+      <i class="info" data-tip="When the live session's context crosses the threshold, fable prunes the transcript automatically (vault backup sealed first, images stripped, nothing lost) and shows you the resume command. Applies to ALL sessions on this machine. Cooldown: 30 min per session."></i></div>
+    <label style="font-size:12px;color:var(--text);cursor:pointer">
+      <input type="checkbox" id="ap-on" ${cfg.autoprune_enabled?"checked":""}> enabled</label>
+    <span style="margin-left:14px;font-size:12px;color:var(--dim)">trigger at
+      <input type="number" id="ap-pct" min="50" max="95" value="${cfg.autoprune_pct||80}" style="width:58px;background:var(--ink3);border:1px solid var(--line);color:var(--text);padding:3px 6px;border-radius:4px"> % context</span>
+    <button class="ghost" style="margin-left:14px" onclick="saveAutoPrune()">save</button>
+  </div>`;
 }
 
 /* ── stats tab ── */
@@ -1510,7 +1633,13 @@ async function loadStats(){
   </div>
   <div class="hint" style="margin-top:18px">card types: ${Object.entries(s.card_types||{}).map(([k,v])=>`${k}=${v}`).join(" · ")||"none"}</div>`;
 }
-if(location.hash.length>1)try{showTab(location.hash.slice(1))}catch(e){}
+if(location.hash.length>1)try{
+  const h=decodeURIComponent(location.hash.slice(1));
+  if(h.startsWith("graph=")){
+    showTab("graph");
+    setTimeout(()=>{$("#g-session").value=h.slice(6);loadGraph(true)},900);
+  } else showTab(h);
+}catch(e){}
 </script>
 </body>
 </html>

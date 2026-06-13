@@ -76,7 +76,7 @@ def api_search(db_path, params):
                   limit=int(one("n") or 25),
                   sort=one("sort") or "relevance",
                   kind=one("kind"), model=one("model"),
-                  project=one("project"))
+                  project=one("project"), session=one("session"))
 
 
 def api_threads(db_path, params):
@@ -241,9 +241,12 @@ def api_diff(db_path, params):
 
 
 def api_graph(db_path, params):
-    """Obsidian-style graph: thread nodes + shared term nodes + citations."""
+    """Memory graph v2 — built from signals that actually exist:
+    thread nodes (always labeled), FILE nodes (paths threads edited),
+    TOPIC nodes (LLM card topics), semantic edges (embedding cosine),
+    citations. TF-IDF trigram terms are gone; wikilinks kept if present."""
     session = (params.get("session") or [None])[0]
-    cap = int((params.get("cap") or ["100"])[0])
+    cap = int((params.get("cap") or ["120"])[0])
     conn = fdb.connect(db_path)
     try:
         scope_sql = "SELECT prompt_id FROM threads"
@@ -260,43 +263,135 @@ def api_graph(db_path, params):
 
         threads = _rows(conn, f"""
             SELECT t.prompt_id, t.est_tokens, t.turn_count, t.first_ts,
-                   c.title, c.type FROM threads t
-            LEFT JOIN cards c ON c.prompt_id = t.prompt_id
+                   t.session_id, c.title, c.type, c.topics
+            FROM threads t LEFT JOIN cards c ON c.prompt_id = t.prompt_id
             WHERE t.prompt_id IN ({ph})""", pids)
+        # every thread gets a human label: card title, else its first
+        # user words from FTS
+        untitled = [t["prompt_id"] for t in threads if not t["title"]]
+        first_words = {}
+        if untitled:
+            uph = ",".join("?" * len(untitled))
+            for pid, content in conn.execute(f"""
+                    SELECT prompt_id, content FROM fts
+                    WHERE prompt_id IN ({uph}) AND kind LIKE '%text%'
+                    """, untitled):
+                if pid not in first_words and content:
+                    first_words[pid] = content.strip().split("\n")[0][:60]
 
-        term_rows = _rows(conn, f"""
-            SELECT term, kind, prompt_id, score FROM terms
-            WHERE kind IN ('target','concept','wikilink')
-            AND prompt_id IN ({ph})""", pids)
-        by_term = {}
-        for tr in term_rows:
-            by_term.setdefault((tr["term"], tr["kind"]), []).append(tr)
-        shared = {k: v for k, v in by_term.items() if 2 <= len(v) <= 40}
-        top_terms = sorted(shared.items(),
-                           key=lambda kv: -sum(t["score"] for t in kv[1]))[:80]
+        nodes, links = [], []
+        for t in threads:
+            nodes.append({
+                "id": t["prompt_id"], "group": "thread",
+                "label": (t["title"] or first_words.get(t["prompt_id"])
+                          or t["prompt_id"][:8]),
+                "type": t["type"], "tokens": t["est_tokens"],
+                "turns": t["turn_count"], "carded": bool(t["title"])})
 
-        nodes = [{"id": t["prompt_id"], "group": "thread",
-                  "label": t["title"] or t["prompt_id"][:8],
-                  "type": t["type"], "tokens": t["est_tokens"],
-                  "turns": t["turn_count"]} for t in threads]
-        links = []
-        for (term, kind), rows in top_terms:
-            nid = f"term:{term}"
-            nodes.append({"id": nid, "group": kind, "label": term,
+        # ── FILE nodes: path-shaped targets, df 2..50 ──
+        file_rows = _rows(conn, f"""
+            SELECT term, prompt_id, score FROM terms
+            WHERE kind = 'target' AND prompt_id IN ({ph})""", pids)
+        by_file = {}
+        for fr in file_rows:
+            by_file.setdefault(fr["term"], []).append(fr)
+        shared_files = sorted(
+            ((k, v) for k, v in by_file.items() if 2 <= len(v) <= 50),
+            key=lambda kv: -len(kv[1]))[:60]
+        for path, rows in shared_files:
+            nid = f"file:{path}"
+            nodes.append({"id": nid, "group": "file",
+                          "label": path.split("/")[-1], "full": path,
                           "df": len(rows)})
-            for tr in rows:
-                links.append({"source": tr["prompt_id"], "target": nid,
-                              "weight": round(tr["score"], 2)})
+            for fr in rows:
+                links.append({"source": fr["prompt_id"], "target": nid,
+                              "kind": "file",
+                              "weight": min(fr["score"], 10)})
 
+        # ── TOPIC nodes: LLM-chosen card topics, df>=2 ──
+        topics = {}
+        for t in threads:
+            try:
+                for topic in json.loads(t["topics"] or "[]"):
+                    topic = str(topic).strip().lower()[:40]
+                    if topic:
+                        topics.setdefault(topic, set()).add(t["prompt_id"])
+            except ValueError:
+                pass
+        for topic, members in sorted(topics.items(),
+                                     key=lambda kv: -len(kv[1]))[:50]:
+            if len(members) < 2:
+                continue
+            nid = f"topic:{topic}"
+            nodes.append({"id": nid, "group": "topic", "label": topic,
+                          "df": len(members)})
+            for pid in members:
+                links.append({"source": pid, "target": nid,
+                              "kind": "topic", "weight": 3})
+
+        # ── wikilinks (first-class when present; top 60 by spread so a
+        # tag-happy archive can't bury the graph) ──
+        wl = {}
+        for term, pid, score in conn.execute(f"""
+                SELECT term, prompt_id, score FROM terms
+                WHERE kind = 'wikilink' AND prompt_id IN ({ph})""", pids):
+            wl.setdefault(term, []).append(pid)
+        for term, wpids in sorted(wl.items(),
+                                  key=lambda kv: -len(kv[1]))[:60]:
+            nid = f"wiki:{term}"
+            nodes.append({"id": nid, "group": "wikilink",
+                          "label": f"[[{term}]]", "df": len(wpids)})
+            for pid in wpids:
+                links.append({"source": pid, "target": nid,
+                              "kind": "wikilink", "weight": 4})
+
+        # ── semantic edges: embedding cosine between carded threads ──
+        try:
+            import struct
+            vecs = {}
+            for pid, blob, dim in conn.execute(f"""
+                    SELECT prompt_id, vec, dim FROM embeddings
+                    WHERE prompt_id IN ({ph})""", pids):
+                vecs[pid] = struct.unpack(f"{dim}f", blob)
+            keys = list(vecs)
+            for i, a in enumerate(keys):
+                va = vecs[a]
+                na = sum(x * x for x in va) ** 0.5 or 1
+                best = []
+                for b in keys[i + 1:]:
+                    vb = vecs[b]
+                    nb = sum(x * x for x in vb) ** 0.5 or 1
+                    cos = sum(x * y for x, y in zip(va, vb)) / (na * nb)
+                    if cos > 0.72:
+                        best.append((cos, b))
+                for cos, b in sorted(best, reverse=True)[:3]:
+                    links.append({"source": a, "target": b,
+                                  "kind": "semantic",
+                                  "weight": round(cos * 10, 1)})
+        except Exception:
+            pass
+
+        # ── citations ──
         cites = _rows(conn, f"""
             SELECT DISTINCT r.prompt_id AS src, ci.ref AS dst
             FROM citations ci JOIN records r ON r.uuid = ci.from_uuid
             WHERE r.prompt_id IN ({ph})""", pids)
-        known = {n["id"] for n in nodes}
+        ids = {n["id"] for n in nodes}
         for c in cites:
-            if c["src"] in known and c["dst"] in known:
+            if c["src"] in ids and c["dst"] in ids:
                 links.append({"source": c["src"], "target": c["dst"],
-                              "weight": 5, "kind": "citation"})
+                              "kind": "citation", "weight": 5})
+
+        # drop isolated thread nodes — the sparse feel came from singletons
+        degree = {}
+        for l in links:
+            degree[l["source"]] = degree.get(l["source"], 0) + 1
+            degree[l["target"]] = degree.get(l["target"], 0) + 1
+        nodes = [n for n in nodes
+                 if degree.get(n["id"]) or n["group"] != "thread"]
+        ids = {n["id"] for n in nodes}
+        links = [l for l in links
+                 if l["source"] in ids and l["target"] in ids]
         return {"nodes": nodes, "links": links}
     finally:
         conn.close()
@@ -714,9 +809,24 @@ def post_settings(db_path, body):
         updates["ANTHROPIC_API_KEY"] = body["anthropic_key"].strip()
     if body.get("openrouter_model"):
         updates["OPENROUTER_MODEL"] = body["openrouter_model"].strip()
-    if not updates:
+    meta = {}
+    if "autoprune_enabled" in body:
+        meta["autoprune_enabled"] = "1" if body["autoprune_enabled"] else "0"
+    if "autoprune_pct" in body:
+        meta["autoprune_pct"] = str(max(50, min(95,
+                                                float(body["autoprune_pct"]))))
+    if not updates and not meta:
         raise ValueError("nothing to save")
-    save_env(updates)
+    if updates:
+        save_env(updates)
+    if meta:
+        conn = fdb.connect(db_path)
+        for k, v in meta.items():
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                (k, v))
+        conn.commit()
+        conn.close()
     return api_settings(db_path, {})
 
 
@@ -728,11 +838,20 @@ def api_settings(db_path, params):
     def mask(key):
         val = os.environ.get(key, "")
         return (val[:7] + "…" + val[-4:]) if len(val) > 14 else bool(val)
+    conn = fdb.connect(db_path)
+    try:
+        cfg = dict(conn.execute(
+            "SELECT key, value FROM meta WHERE key IN "
+            "('autoprune_enabled','autoprune_pct')").fetchall())
+    finally:
+        conn.close()
     return {"providers": availability(),
             "openrouter_key": mask("OPENROUTER_API_KEY"),
             "anthropic_key": mask("ANTHROPIC_API_KEY"),
             "openrouter_model": os.environ.get("OPENROUTER_MODEL", ""),
-            "env_path": env_path()}
+            "env_path": env_path(),
+            "autoprune_enabled": cfg.get("autoprune_enabled") == "1",
+            "autoprune_pct": float(cfg.get("autoprune_pct") or 80)}
 
 
 def api_backfill_progress(db_path, params):
@@ -774,6 +893,44 @@ ROUTES["/api/costs"] = api_costs
 ROUTES["/api/dashboard"] = api_dashboard
 ROUTES["/api/export"] = api_export
 ROUTES["/api/files"] = api_files
+def api_filediff2(db_path, params):
+    """Side-by-side diff rows (difflib opcodes) for the Files tab."""
+    from fable.filetime import file_events, reconstruct
+    import difflib
+    one = lambda k: (params.get(k) or [None])[0]
+    path, a, b = one("path"), int(one("a") or 0), int(one("b") or 0)
+    versions = reconstruct(file_events(db_path, path))
+    va, vb = versions[a], versions[b]
+    if va["content"] is None or vb["content"] is None:
+        raise ValueError("one of the selected versions is not "
+                         "reconstructable")
+    A, B = va["content"].splitlines(), vb["content"].splitlines()
+    rows = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, A, B, autojunk=False).get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1):
+                rows.append({"op": "eq", "al": i1 + k + 1, "a": A[i1 + k],
+                             "bl": j1 + k + 1, "b": B[j1 + k]})
+        else:
+            la, lb = i2 - i1, j2 - j1
+            for k in range(max(la, lb)):
+                rows.append({
+                    "op": tag,
+                    "al": i1 + k + 1 if k < la else None,
+                    "a": A[i1 + k] if k < la else None,
+                    "bl": j1 + k + 1 if k < lb else None,
+                    "b": B[j1 + k] if k < lb else None})
+        if len(rows) > 8000:
+            rows.append({"op": "eq", "al": None, "a": "… diff truncated …",
+                         "bl": None, "b": "… diff truncated …"})
+            break
+    return {"rows": rows,
+            "a": {"i": a, "ts": va["ts"], "tool": va["tool"]},
+            "b": {"i": b, "ts": vb["ts"], "tool": vb["tool"]}}
+
+
+ROUTES["/api/filediff2"] = api_filediff2
 ROUTES["/api/filehist"] = api_filehist
 ROUTES["/api/filediff"] = api_filediff
 ROUTES["/api/fileversion"] = api_fileversion

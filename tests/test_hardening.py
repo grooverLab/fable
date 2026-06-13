@@ -28,19 +28,26 @@ class Base(unittest.TestCase):
 
 
 class TestStaleIndexDetection(Base):
-    def test_recall_refuses_changed_file(self):
+    def test_append_only_growth_is_not_stale(self):
         live = self.index_live([rec("a", "p1", None, "user", text="hello")])
-        with open(live, "a") as f:  # file mutates after indexing
+        with open(live, "a") as f:  # active session keeps appending
             f.write(json.dumps(rec("b", "p1", "a", "user", text="more"))
                     + "\n")
+        # indexed offsets are still valid — reads must succeed
+        self.assertIn("hello", get_block(self.dbpath, "a"))
+        self.assertIn("hello", render_thread(self.dbpath, "p1"))
+
+    def test_rewrite_is_stale(self):
+        live = self.index_live([
+            rec("a", "p1", None, "user", text="hello padding padding")])
+        # rewrite SMALLER (prune-style): offsets are garbage now
+        from tests.helpers import write_jsonl
+        write_jsonl(live, [rec("a", "p1", None, "user", text="hi")])
         with self.assertRaises(StaleIndexError):
             get_block(self.dbpath, "a")
-        with self.assertRaises(StaleIndexError):
-            render_thread(self.dbpath, "p1")
-        # re-index heals it
         index_vault(self.dbpath, [], live_file=live,
                     extract_fn=fts_extract_fn)
-        self.assertIn("hello", get_block(self.dbpath, "a"))
+        self.assertIn("hi", get_block(self.dbpath, "a"))
 
 
 class TestNoNestedSentinels(Base):
@@ -141,11 +148,17 @@ class TestStaleSelfHeal(unittest.TestCase):
                 rec("a", "p1", None, "user", "2026-06-01T00:00:01Z",
                     text="hello world")])
             index_vault(db, [], live_file=live, extract_fn=fts_extract_fn)
-            # the session keeps talking: live file grows after indexing
-            with open(live, "a") as f:
-                f.write(_json.dumps(
-                    rec("b", None, "a", "assistant",
-                        "2026-06-01T00:00:02Z", text="reply")) + "\n")
+            # a prune-style rewrite (smaller) makes offsets garbage
+            from tests.helpers import write_jsonl
+            write_jsonl(live, [
+                rec("a", "p1", None, "user", "2026-06-01T00:00:01Z",
+                    text="hello world"),
+                rec("b", None, "a", "assistant",
+                    "2026-06-01T00:00:02Z", text="reply")])
+            os.truncate(live, os.path.getsize(live) - 2)  # force shrink
+            write_jsonl(live, [
+                rec("a", "p1", None, "user", "2026-06-01T00:00:01Z",
+                    text="hello world")])
             try:
                 render_thread(db, "p1", sentinel=False)
                 self.fail("expected StaleIndexError")
@@ -153,7 +166,6 @@ class TestStaleSelfHeal(unittest.TestCase):
                 self.assertTrue(_heal_stale(db, e))
             out = render_thread(db, "p1", sentinel=False)
             self.assertIn("hello world", out)
-            self.assertIn("reply", out)   # the appended turn is now indexed
 
     # immutable vault files must NOT self-heal — drift there is a real error
         finally:
