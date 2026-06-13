@@ -737,11 +737,71 @@ BACKFILL = {"running": False, "project": None, "done": 0, "total": 0,
             "generated": 0, "failed": 0, "started": 0.0, "finished": None,
             "error": None}
 _BACKFILL_LOCK = threading.Lock()
+_WORKER = {"active": False}  # is a server-side queue-drain worker running?
+
+
+def _friendly_error(msg):
+    """Map a raw provider/backfill error to clear UI guidance."""
+    m = (msg or "").lower()
+    if any(k in m for k in ("401", "user not found", "invalid api key",
+                            "unauthorized", "no api key", "403")):
+        return "provider key invalid or expired — update it in Settings"
+    if any(k in m for k in ("429", "rate", "quota", "limit")):
+        return ("rate limited / daily quota reached — it retries automatically;"
+                " resume later")
+    if any(k in m for k in ("empty", "non-json", "expecting value",
+                            "overloaded", "unexpected response")):
+        return "provider returned empty/garbled responses (overloaded) — retrying"
+    if any(k in m for k in ("connection", "timed out", "timeout", "urlopen",
+                            "refused", "could not reach")):
+        return "couldn't reach the provider — check your network / Ollama"
+    return (msg or "")[:140]
+
+
+def _drain_worker(db_path):
+    """One server-side worker drains the DB job queue, one job after another.
+    The control state (running/stop/queue) lives in the DB, so the dashboard
+    always shows the truth and can always control a run — no matter who
+    started it (sidebar, this worker, or a CLI process)."""
+    import time as _time
+    from fable import cards as _c
+    _WORKER["active"] = True
+    try:
+        while True:
+            if _c.read_backfill_state(db_path).get("stop"):
+                break
+            job = _c.pop_job(db_path)
+            if not job:
+                break
+            BACKFILL.update({"running": True, "project": job.get("project"),
+                             "session": job.get("session"),
+                             "provider": job.get("provider"),
+                             "model": job.get("model"),
+                             "done": 0, "total": job.get("candidates", 0),
+                             "generated": 0, "failed": 0,
+                             "started": _time.time(), "finished": None,
+                             "error": None, "stop_requested": False})
+            try:
+                stats = _c.run_cards(
+                    db_path, project=job.get("project"),
+                    session=job.get("session"),
+                    provider=job.get("provider"), model=job.get("model"),
+                    on_state=lambda s: BACKFILL.update(s),
+                    should_stop=lambda: BACKFILL.get("stop_requested"))
+                BACKFILL["error"] = (stats["errors"][-1]["error"][:200]
+                                     if stats.get("aborted")
+                                     and stats["errors"] else None)
+            except Exception as e:
+                BACKFILL["error"] = str(e)[:300]
+            BACKFILL["running"] = False
+            BACKFILL["finished"] = _time.time()
+    finally:
+        _WORKER["active"] = False
+        _c.clear_stop(db_path)
 
 
 def post_cards_run(db_path, body):
-    import time as _time
-    from fable.cards import run_cards
+    from fable.cards import run_cards, enqueue_job, clear_stop
     from fable.providers import PROVIDERS
     project = body.get("project") or None
     session = body.get("session") or None
@@ -749,54 +809,48 @@ def post_cards_run(db_path, body):
     model = body.get("model") or None
     if provider not in PROVIDERS:
         raise ValueError(f"provider must be one of {PROVIDERS}")
+    dry = run_cards(db_path, project=project, session=session, dry_run=True)
+    if not dry["candidates"]:
+        raise ValueError("no uncarded threads in scope — nothing to do")
+    label = (f"session {session[:8]}" if session
+             else (project or "all projects"))
+    job = {"project": project, "session": session, "provider": provider,
+           "model": model, "label": label, "candidates": dry["candidates"]}
     with _BACKFILL_LOCK:
-        external = api_backfill_progress(db_path, {})
-        if BACKFILL["running"] or external.get("running"):
-            raise ValueError(
-                "a backfill is already running "
-                f"({external.get('done', 0)}/{external.get('total', 0)}) — "
-                "stop it first or wait")
-        # dry-run to size the job before committing
-        dry = run_cards(db_path, project=project, session=session,
-                        dry_run=True)
-        if not dry["candidates"]:
-            raise ValueError("no uncarded threads in scope — nothing to do")
-        BACKFILL.update({"running": True, "project": project,
-                         "session": session,
-                         "provider": provider, "model": model,
-                         "done": 0, "total": dry["candidates"],
-                         "generated": 0, "failed": 0,
-                         "started": _time.time(), "finished": None,
-                         "error": None, "stop_requested": False})
-
-    def state(s):
-        BACKFILL.update(s)
-
-    def work():
-        try:
-            stats = run_cards(
-                db_path, project=project, session=session, on_state=state,
-                provider=provider, model=model,
-                should_stop=lambda: BACKFILL.get("stop_requested"))
-            BACKFILL["error"] = (stats["errors"][-1]["error"][:200]
-                                 if stats.get("aborted") and stats["errors"]
-                                 else None)
-        except Exception as e:
-            BACKFILL["error"] = str(e)[:300]
-        finally:
-            BACKFILL["running"] = False
-            BACKFILL["finished"] = _time.time()
-
-    threading.Thread(target=work, daemon=True).start()
-    return {"started": True, "project": project, "provider": provider,
-            "candidates": BACKFILL["total"]}
+        position = enqueue_job(db_path, job)
+        if not _WORKER["active"]:
+            clear_stop(db_path)
+            threading.Thread(target=_drain_worker, args=(db_path,),
+                             daemon=True).start()
+            started = True
+        else:
+            started = False
+    return {"queued": True, "position": position, "label": label,
+            "started": started, "candidates": dry["candidates"]}
 
 
 def post_cards_stop(db_path, body):
-    if not BACKFILL["running"]:
-        return {"stopped": False, "reason": "nothing running"}
+    import time as _time
+    from fable.cards import (request_stop, read_backfill_state,
+                             _update_backfill_state)
+    # DB stop flag → honored by the server worker AND any external/CLI run;
+    # also clears the queue
+    request_stop(db_path)
     BACKFILL["stop_requested"] = True
+    # if nothing is actively updating the state (an orphaned run after a
+    # restart), force the visible state to stopped so the UI shows the truth
+    st = read_backfill_state(db_path)
+    fresh = (_time.time() - st.get("updated", 0)) < 30
+    if not (_WORKER["active"] or fresh):
+        _update_backfill_state(db_path, lambda s: {
+            **s, "running": False, "finished": _time.time(), "queue": []})
     return {"stopped": True}
+
+
+def post_cards_dequeue(db_path, body):
+    from fable.cards import remove_job
+    remove_job(db_path, int(body.get("index", -1)))
+    return {"ok": True}
 
 
 def post_settings(db_path, body):
@@ -884,9 +938,46 @@ def api_backfill_progress(db_path, params):
         rate = out["done"] / max(_time.time() - out["started"], 1)
         out["eta_seconds"] = int((out["total"] - out["done"])
                                  / max(rate, 1e-6))
+    # always surface the queue from the DB so the UI can show pending jobs
+    try:
+        conn = fdb.connect(db_path)
+        row = conn.execute("SELECT value FROM meta "
+                           "WHERE key='backfill_state'").fetchone()
+        conn.close()
+        out["queue"] = (json.loads(row[0]).get("queue") if row else []) or []
+    except Exception:
+        out["queue"] = []
+    if out.get("error"):
+        out["error_raw"] = out["error"]
+        out["error"] = _friendly_error(out["error"])
     return out
 
 
+def api_cards_health(db_path, params):
+    """Card-generation reliability per provider x model + failure reasons."""
+    conn = fdb.connect(db_path)
+    try:
+        rows = _rows(conn, """
+            SELECT provider, model, COUNT(*) AS attempts, SUM(ok) AS ok,
+                   COUNT(*) - SUM(ok) AS failed, MAX(ts) AS last_ts
+            FROM card_attempts GROUP BY provider, model
+            ORDER BY attempts DESC""")
+        for r in rows:
+            r["ok"] = r["ok"] or 0
+            r["success_rate"] = round(100 * r["ok"] / max(r["attempts"], 1), 1)
+            r["reasons"] = dict(conn.execute(
+                "SELECT reason, COUNT(*) FROM card_attempts WHERE provider IS ?"
+                " AND model IS ? AND ok = 0 AND reason IS NOT NULL "
+                "GROUP BY reason ORDER BY COUNT(*) DESC",
+                (r["provider"], r["model"])).fetchall())
+        tot = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(ok),0) FROM card_attempts").fetchone()
+        return {"by": rows, "attempts": tot[0] or 0, "ok": tot[1] or 0}
+    finally:
+        conn.close()
+
+
+ROUTES["/api/cards/health"] = api_cards_health
 ROUTES["/api/backfill"] = api_backfill_progress
 ROUTES["/api/settings"] = api_settings
 ROUTES["/api/costs"] = api_costs
@@ -938,8 +1029,15 @@ ROUTES["/api/sessionfiles"] = api_sessionfiles
 ROUTES["/api/facts"] = api_facts
 
 def post_prune_plan(db_path, body):
+    import time as _time
     from fable.prune import preview
-    return preview(_live_path(db_path, body["session"]))
+    live = _live_path(db_path, body["session"])
+    rep = preview(live)
+    age = _time.time() - os.path.getmtime(live)
+    rep["seconds_since_modified"] = int(age)
+    rep["active"] = age < 60
+    rep["cooldown_remaining"] = max(0, int(60 - age))
+    return rep
 
 
 def post_prune_apply(db_path, body):
@@ -971,6 +1069,7 @@ POST_ROUTES = {
     "/api/prune/apply": post_prune_apply,
     "/api/cards/run": post_cards_run,
     "/api/cards/stop": post_cards_stop,
+    "/api/cards/dequeue": post_cards_dequeue,
     "/api/settings": post_settings,
     "/api/facts": post_facts,
     "/api/session/meta": post_session_meta,
@@ -1031,7 +1130,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(payload).encode(),
                        "application/json")
         except (KeyError, ValueError, FileNotFoundError, RuntimeError) as e:
-            self._send(400, json.dumps({"error": str(e)}).encode(),
+            self._send(400, json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(),
                        "application/json")
 
     def do_POST(self):
@@ -1046,10 +1145,19 @@ class Handler(BaseHTTPRequestHandler):
             payload = fn(self.db_path, body)
             self._send(200, json.dumps(payload).encode(),
                        "application/json")
-        except (KeyError, ValueError, FileNotFoundError,
-                RuntimeError, json.JSONDecodeError) as e:
-            self._send(400, json.dumps({"error": str(e)}).encode(),
-                       "application/json")
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                with open(os.path.join(os.path.dirname(
+                        os.path.abspath(self.db_path)), "errors.log"),
+                        "a") as fh:
+                    fh.write(f"\n=== POST {parsed.path} ===\n{tb}\n")
+            except OSError:
+                pass
+            self._send(400, json.dumps(
+                {"error": f"{type(e).__name__}: {e}"}).encode(),
+                "application/json")
 
     def _send(self, status, body, ctype):
         self.send_response(status)

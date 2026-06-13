@@ -208,6 +208,10 @@ def _recompute_best(conn, uuids: Set[str], extract_fn=None, stats=None):
             if stats is not None:
                 stats["recompute_read_errors"] += 1
             continue
+        # records with a SYNTHESIZED identity (file-history-snapshot, whose
+        # raw obj has no "uuid" key) carry it only in the index, not on disk —
+        # stamp the canonical uuid back on so _upsert_record never KeyErrors.
+        obj["uuid"] = uuid
         _upsert_record(conn, obj, file_id, lineno, offset, length,
                        extract_fn=extract_fn,
                        session_id=obj.get("sessionId"))

@@ -131,6 +131,19 @@ CREATE TABLE IF NOT EXISTS ops(
 );
 CREATE INDEX IF NOT EXISTS idx_ops_kind ON ops(kind);
 
+-- card-generation telemetry: one row per attempt (success or failure),
+-- so the dashboard can show reliability per provider x model
+CREATE TABLE IF NOT EXISTS card_attempts(
+  id INTEGER PRIMARY KEY,
+  ts TEXT NOT NULL DEFAULT (datetime('now')),
+  prompt_id TEXT,
+  provider TEXT,
+  model TEXT,
+  ok INTEGER NOT NULL DEFAULT 0,
+  reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_card_attempts_pm ON card_attempts(provider, model);
+
 CREATE TABLE IF NOT EXISTS facts(
   id INTEGER PRIMARY KEY,
   fact TEXT NOT NULL,

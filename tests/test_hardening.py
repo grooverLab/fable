@@ -170,3 +170,34 @@ class TestStaleSelfHeal(unittest.TestCase):
     # immutable vault files must NOT self-heal — drift there is a real error
         finally:
             shutil.rmtree(d)
+
+
+class TestRecomputeBestSnapshot(Base):
+    """Regression: a file-history-snapshot record (no on-disk 'uuid') must
+    survive _recompute_best (the post-prune pointer recompute) without a
+    KeyError. This is the bug that crashed prune-apply on sessions with a
+    rewind snapshot."""
+
+    def test_snapshot_recompute_no_keyerror(self):
+        snap = {"type": "file-history-snapshot", "messageId": "m1",
+                "snapshot": {"timestamp": "2026-06-01T00:00:05Z",
+                             "trackedFileBackups": {
+                                 "/x/y.py": {"backupFileName": "y@v1"}}}}
+        a = rec("a", "p1", None, "user", "2026-06-01T00:00:01Z", text="hello")
+        b = rec("b", "p1", "a", "assistant", "2026-06-01T00:00:02Z",
+                text="world wide")
+        vault = write_jsonl(os.path.join(self.dir, "v0-raw.jsonl"),
+                            [a, snap, b])
+        live = write_jsonl(os.path.join(self.dir, "live.jsonl"), [a, snap, b])
+        index_vault(self.dbpath, [vault], live_file=live,
+                    extract_fn=fts_extract_fn)
+        # prune-style rewrite: drop the snapshot from live -> its best copy
+        # must be recomputed from the vault (obj on disk has no 'uuid')
+        write_jsonl(live, [a, b])
+        stats = index_vault(self.dbpath, [vault], live_file=live,
+                            extract_fn=fts_extract_fn)  # must NOT raise
+        conn = fdb.connect(self.dbpath)
+        n = conn.execute("SELECT COUNT(*) FROM records "
+                         "WHERE type='file-history-snapshot'").fetchone()[0]
+        conn.close()
+        self.assertEqual(n, 1)  # snapshot survived via the vault copy

@@ -47,8 +47,10 @@ def save_env(updates: dict) -> str:
     return path
 
 
-def load_env(path: str = None) -> None:
-    """Load KEY=VALUE lines; never override real environment variables.
+def load_env(path: str = None, override: bool = False) -> None:
+    """Load KEY=VALUE lines from .env. By default real environment variables
+    win; pass override=True to hot-reload .env values over them — so a key
+    changed in the dashboard or .env takes effect with no server restart.
 
     Default search order: FABLE_ENV, ./.env, then <repo-root>/.env."""
     if path is None:
@@ -67,8 +69,14 @@ def load_env(path: str = None) -> None:
                 continue
             key, _, val = line.partition("=")
             key, val = key.strip(), val.strip().strip('"').strip("'")
-            if key and key not in os.environ:
+            if key and (override or key not in os.environ):
                 os.environ[key] = val
+
+
+def reload_env(path: str = None) -> None:
+    """Force-reload .env over the live environment (called at the start of
+    each backfill run so a freshly-set key works without a restart)."""
+    load_env(path, override=True)
 
 
 _last_call = [0.0]
@@ -118,12 +126,26 @@ def chat(messages, model=None, api_key=None, base_url=None,
             })
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
-                body = json.loads(resp.read().decode())
+                raw = resp.read().decode("utf-8", "replace")
             try:
-                return body["choices"][0]["message"]["content"]
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                # empty / HTML / truncated body — overloaded free tier or an
+                # auth/quota problem. Surface a clear, typed (retriable)
+                # error instead of a raw "Expecting value" JSON exception.
+                raise OpenRouterError(
+                    "provider returned a non-JSON or empty response "
+                    "(overloaded, or an auth/quota issue) — first 160 chars: "
+                    f"{raw[:160]!r}")
+            try:
+                content = body["choices"][0]["message"]["content"]
             except (KeyError, IndexError, TypeError):
                 raise OpenRouterError(f"unexpected response shape: "
                                       f"{json.dumps(body)[:500]}")
+            if not content or not str(content).strip():
+                raise OpenRouterError("provider returned an empty completion "
+                                      "(overloaded / rate-limited)")
+            return content
         except urllib.error.HTTPError as e:
             status = e.code
             retryable = status == 429 or status >= 500

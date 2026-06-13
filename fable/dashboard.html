@@ -452,6 +452,7 @@ button.danger:hover{background:#ff8557}
         <i class="info" data-tip="The other scalpel: prune keeps EVERY thread and turn but slims each message — tool outputs become '[pruned]', noise records drop, optionally images strip. The conversation skeleton stays complete. Use prune for routine weight loss; use thread surgery below to remove whole dead conversations. Both: vault backup first, everything stays recallable in fable."></i>
         <span class="ph-sub" style="margin-left:8px">your live transcript is paying rent for every byte — this is the cheapest eviction</span>
         <div id="p-report" style="margin-top:10px;font-size:12px"><span class="loading" style="padding:0">scanning live file…</span></div>
+        <div id="p-cooldown" style="display:none;margin-top:8px;font-size:11.5px;color:var(--dim);border:1px dashed var(--line);border-radius:6px;padding:7px 10px"></div>
         <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
           <span class="bf-btn" onclick="previewPrune()" title="re-scan the live file">↻ rescan</span>
           <label style="font-size:11px;color:var(--dim)"><input type="checkbox" id="p-img" style="accent-color:var(--phos)" onchange="renderPruneHero()"> also strip images</label>
@@ -771,6 +772,14 @@ function confirmModal(msg){
 function closeModal(){
   $("#modal-bg").style.display="none";$("#modal").style.display="none";
 }
+function toast(msg){
+  let t=document.getElementById('fable-toast');
+  if(!t){t=document.createElement('div');t.id='fable-toast';
+    t.style.cssText='position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--ink2);border:1px solid var(--phos-dim);color:var(--text);padding:10px 18px;border-radius:8px;font:12.5px var(--mono);z-index:99999;box-shadow:0 8px 30px rgba(0,0,0,.55);transition:opacity .35s;max-width:80vw;text-align:center';
+    document.body.appendChild(t);}
+  t.textContent=msg;t.style.opacity='1';
+  clearTimeout(t._h);t._h=setTimeout(()=>{t.style.opacity='0';},2800);
+}
 document.addEventListener("keydown",e=>{if(e.key==="Escape")closeModal()});
 async function showDiff(uuid,fileIds){
   openModal("⇄ generation diff","record "+uuid.slice(0,8)+" — fullest vs most-pruned copy",
@@ -970,11 +979,30 @@ async function previewPrune(){
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({session:$("#s-session").value})}).then(x=>x.json());
   if(r.error){box.innerHTML=`<span class="warnbox" style="margin:0">${esc(r.error)}</span>`;return}
-  $("#p-apply").style.display="";
-  const pct=Math.round(100*r.est_savings_bytes/Math.max(r.total_bytes,1));
-  const pctImg=Math.round(100*r.est_savings_with_images_bytes/Math.max(r.total_bytes,1));
   window.PRUNE_PREV=r;
   renderPruneHero();
+  startPruneCooldown(r.active?(r.cooldown_remaining||0):0);
+}
+let PRUNE_CD_TIMER=null;
+function startPruneCooldown(remaining){
+  clearInterval(PRUNE_CD_TIMER);
+  const apply=$("#p-apply"), cd=$("#p-cooldown");
+  function paint(sec){
+    if(sec>0){
+      apply.style.display="none";
+      cd.style.display="";
+      cd.innerHTML=`⏳ this session is <b style="color:var(--ember)">live</b> — slimming unlocks in <b style="color:var(--phos)">${sec}s</b>. Claude Code is still writing to it; <b>/exit</b> the session and it arms automatically (or it keeps resetting while in use).`;
+    }else{
+      apply.style.display="";
+      cd.style.display="none";
+      clearInterval(PRUNE_CD_TIMER);
+    }
+  }
+  paint(remaining);
+  if(remaining>0){
+    let s=remaining;
+    PRUNE_CD_TIMER=setInterval(()=>{ s-=1; if(s<=0){ clearInterval(PRUNE_CD_TIMER); previewPrune(); } else paint(s); },1000);
+  }
 }
 function renderPruneHero(){
   const r=window.PRUNE_PREV; if(!r)return;
@@ -999,7 +1027,7 @@ async function applyPrune(){
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({session:$("#s-session").value,confirm:true,
       strip_images:$("#p-img").checked})}).then(x=>x.json());
-  if(r.error){$("#p-report").innerHTML=`<span class="warnbox">${esc(r.error)}</span>`;return}
+  if(r.error){$("#p-report").innerHTML=`<span class="warnbox">${esc(r.error)}</span>`;if(/ACTIVE/i.test(r.error))previewPrune();return}
   $("#p-apply").style.display="none";
   $("#p-report").innerHTML=`<span style="color:var(--green)">✓ pruned — ${fmt(r.chars)}B written,
     chain ${r.chain_valid?"VALID":"BROKEN"}, backup ${esc(r.backup||"sealed")}, re-indexed.</span>`;
@@ -1139,7 +1167,7 @@ let lqTimer=null;
 $("#lq").addEventListener("input",()=>{clearTimeout(lqTimer);lqTimer=setTimeout(loomSearch,350)});
 async function loomSearch(){
   const q=$("#lq").value.trim();
-  if(!q)return;
+  if(!q){$("#lresults").innerHTML='<div class="empty" style="padding:26px 10px">search your whole archive — results are <b>conversation threads</b> (titled by their card when one exists). Click any to weave it into the workspace.</div>';return}
   $("#lresults").innerHTML='<div class="loading">searching the archive…</div>';
   const hits=await api("/api/search",{q,n:20});
   if(hits.error||!hits.length){
@@ -1207,12 +1235,21 @@ async function startBackfill(project,session){
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({project,session,provider:$("#bf-provider").value,
       model:$("#bf-model").value||null})}).then(x=>x.json());
-  if(r.error){alert(r.error);return}
+  if(r.error){openModal("backfill","",`<div class="warnbox" style="margin:0">${esc(r.error)}</div>`);return}
+  toast(r.started?`backfill started — ${esc(r.label)} (${r.candidates} threads)`
+                 :`queued #${r.position} — ${esc(r.label)} (${r.candidates} threads)`);
   pollBackfill();
 }
 async function stopBackfill(){
+  if(!await confirmModal("Stop the backfill?\n\nThis halts the current job and clears the queue. Cards already generated are kept — re-run any time to resume."))return;
   await fetch("/api/cards/stop",{method:"POST",
     headers:{"Content-Type":"application/json"},body:"{}"});
+  toast("backfill stopping…");pollBackfill();
+}
+async function dequeueJob(i){
+  await fetch("/api/cards/dequeue",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:JSON.stringify({index:i})});
+  toast("removed from queue");pollBackfill();
 }
 async function pollBackfill(){
   clearTimeout(bfTimer);
@@ -1222,18 +1259,24 @@ async function pollBackfill(){
     ?Math.round(s.eta_seconds/3600)+"h":Math.round(s.eta_seconds/60)+"m"):"…";
   const scope=s.session?("session "+(s.session||"").slice(0,8))
     :(s.project||"all projects");
+  const q=s.queue||[];
+  // stop is ALWAYS available while running/queued — works cross-process via
+  // the DB stop flag, no matter who started the run (sidebar, CLI, worker)
+  const stopBtn='<span class="bf-btn" onclick="stopBackfill()" style="color:var(--ember)">■ stop</span>';
+  const qhtml=q.length?`<div class="bf-meta" style="padding:2px 0 0;color:var(--dim)">⋯ queued: ${q.map((j,i)=>`${esc(j.label||"job")} (${j.candidates||0})<span class="bf-btn" title="remove from queue" onclick="dequeueJob(${i})">✕</span>`).join(" · ")}</div>`:"";
   const bar=s.running
     ?`<div class="bf-bar" style="margin:3px 0"><i style="width:${pct}%"></i></div>
-      <div class="bf-meta" style="padding:0">✦ ${esc(scope)}${s.external?" (CLI)":""} · ${s.done||0}/${s.total} (${pct}%)
-      · ${s.generated||0} ok · ${s.failed||0} fail · ~${eta}
-      ${s.external?"":'<span class="bf-btn" onclick="stopBackfill()" style="color:var(--ember)">■ stop</span>'}</div>`
-    :(s.finished?`<div class="bf-meta" style="padding:0;color:${s.error?"var(--ember)":"var(--green)"}">✦ last run: ${s.generated||0} cards${s.failed?", "+s.failed+" failed":""}${s.error?" — "+esc((s.error||"").slice(0,60)):""}</div>`:"");
+      <div class="bf-meta" style="padding:0">✦ ${esc(scope)}${s.external?" (background)":""} · ${s.done||0}/${s.total} (${pct}%)
+      · ${s.generated||0} ok · ${s.failed||0} fail · ~${eta} ${stopBtn}</div>${qhtml}`
+    :(q.length
+      ?`<div class="bf-meta" style="padding:0;color:var(--dim)">✦ ${q.length} job(s) queued — starting… ${stopBtn}</div>${qhtml}`
+      :(s.finished?`<div class="bf-meta" style="padding:0;color:${s.error?"var(--ember)":"var(--green)"}">✦ last run: ${s.generated||0} cards${s.failed?", "+s.failed+" failed":""}${s.error?" — "+esc((s.error||"").slice(0,90)):""}</div>`:""));
   const g=$("#bf-global");if(g)g.innerHTML=bar;
   document.querySelectorAll(".proj").forEach(el=>{
     const slot=el.querySelector(".bf-slot");if(!slot)return;
     slot.innerHTML=(s.running&&s.project&&el.dataset.project===s.project)?bar:"";
   });
-  bfTimer=setTimeout(pollBackfill,s.running?4000:15000);
+  bfTimer=setTimeout(pollBackfill,(s.running||q.length)?4000:15000);
 }
 pollBackfill();
 function renderList(jsonText){
@@ -1348,12 +1391,42 @@ async function loadDashboard(){
           ${(d.ops_recent||[]).map(o=>`<div>${esc((o.ts||"").slice(5,16))} · <span style="color:var(--cyan)">${esc(o.kind)}</span> <span style="color:var(--faint)">${esc((o.detail||"").slice(0,80))}</span></div>`).join("")}
         </div></div>
     </div>
+    <div class="genwrap" id="card-health" style="margin-top:14px">
+      <b style="color:var(--phos)">Card-generation health</b>
+      <i class="info" data-tip="Reliability per provider × model: every generation attempt is logged (success or failure) with a bucketed reason. Spot which provider is worth your tokens and why cards fail."></i>
+      <div class="hint" style="margin-top:6px">loading attempts…</div>
+    </div>
     <div class="hint" style="margin-top:12px">${esc(c.note)} · pricing table per model family, cache-aware</div>`;
   const scopedByModel={};d.daily.forEach(r=>{
     scopedByModel[r.model]=Math.round(((scopedByModel[r.model]||0)+r.cost)*100)/100;});
   drawDaily(d.daily);
   drawDonut(scopeLabel?scopedByModel:c.by_model);
   drawProj(c.by_project,d.project);
+  loadCardHealth();
+}
+async function loadCardHealth(){
+  const el=$("#card-health");if(!el)return;
+  const h=await api("/api/cards/health");
+  const rate=h.attempts?Math.round(100*h.ok/h.attempts):0;
+  if(!h.attempts){el.innerHTML=`<b style="color:var(--phos)">Card-generation health</b>
+    <div class="hint" style="margin-top:8px">no attempts logged yet — run a backfill and per-provider success rates appear here.</div>`;return}
+  const rows=h.by.map(r=>{
+    const col=r.success_rate>=90?"var(--green)":r.success_rate>=60?"var(--phos)":"var(--ember)";
+    const reasons=Object.entries(r.reasons||{}).map(([k,v])=>`${esc(k)} ${v}`).join(" · ");
+    return `<tr>
+      <td>${esc(r.provider||"?")}</td>
+      <td style="color:var(--dim)">${esc(shortModel(r.model))}</td>
+      <td style="text-align:right">${fmt(r.attempts)}</td>
+      <td style="text-align:right;color:var(--green)">${fmt(r.ok)}</td>
+      <td style="text-align:right;color:var(--ember)">${fmt(r.failed)}</td>
+      <td style="text-align:right;color:${col};font-weight:600">${r.success_rate}%</td>
+      <td style="color:var(--faint);font-size:10.5px">${reasons||"—"}</td></tr>`;}).join("");
+  el.innerHTML=`<b style="color:var(--phos)">Card-generation health</b>
+    <i class="info" data-tip="Reliability per provider × model. Failure reasons: auth (bad/expired key), rate-limit (quota), empty/overload (provider returned nothing), parse, network."></i>
+    <span style="float:right;font-size:11px;color:var(--dim)">overall <b style="color:${rate>=90?'var(--green)':rate>=60?'var(--phos)':'var(--ember)'}">${rate}%</b> · ${fmt(h.ok)}/${fmt(h.attempts)}</span>
+    <table style="width:100%;font-size:11.5px;margin-top:10px;border-collapse:collapse">
+      <tr style="color:var(--faint)"><td>provider</td><td>model</td><td style="text-align:right">tries</td><td style="text-align:right">ok</td><td style="text-align:right">fail</td><td style="text-align:right">rate</td><td>top reasons</td></tr>
+      ${rows}</table>`;
 }
 function copyResume(sid){
   navigator.clipboard.writeText("claude --resume "+sid);

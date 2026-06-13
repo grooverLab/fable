@@ -33,7 +33,9 @@ ANTHROPIC_MODELS = {
 
 def complete(prompt: str, provider: str = "openrouter", model=None,
              **kw) -> str:
-    load_env()
+    # hot-reload .env over the live env on EVERY call, so a key/model changed
+    # in the dashboard or .env takes effect for ALL providers with no restart
+    load_env(override=True)
     if provider == "openrouter":
         return openrouter_chat([{"role": "user", "content": prompt}],
                                model=model, **kw)

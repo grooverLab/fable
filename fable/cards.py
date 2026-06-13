@@ -132,6 +132,112 @@ def _is_rate_limited(err) -> bool:
     return "429" in text or "rate" in text or "quota" in text
 
 
+# ── backfill queue + stop, persisted in the DB so EVERY runner (the
+# dashboard worker, the CLI, another process) sees the same control state ──
+
+def read_backfill_state(db_path):
+    try:
+        c = fdb.connect(db_path)
+        row = c.execute("SELECT value FROM meta "
+                        "WHERE key='backfill_state'").fetchone()
+        c.close()
+        return json.loads(row[0]) if row else {}
+    except Exception:
+        return {}
+
+
+def _update_backfill_state(db_path, fn):
+    c = fdb.connect(db_path)
+    try:
+        row = c.execute("SELECT value FROM meta "
+                        "WHERE key='backfill_state'").fetchone()
+        try:
+            st = json.loads(row[0]) if row else {}
+        except Exception:
+            st = {}
+        st = fn(dict(st))
+        c.execute("INSERT OR REPLACE INTO meta(key, value) "
+                  "VALUES('backfill_state', ?)", (json.dumps(st),))
+        c.commit()
+        return st
+    finally:
+        c.close()
+
+
+def enqueue_job(db_path, job):
+    def f(st):
+        q = list(st.get("queue") or []); q.append(job); st["queue"] = q
+        return st
+    return len(_update_backfill_state(db_path, f).get("queue") or [])
+
+
+def pop_job(db_path):
+    box = {}
+    def f(st):
+        q = list(st.get("queue") or [])
+        if q:
+            box["job"] = q.pop(0)
+        st["queue"] = q
+        return st
+    _update_backfill_state(db_path, f)
+    return box.get("job")
+
+
+def remove_job(db_path, index):
+    def f(st):
+        q = list(st.get("queue") or [])
+        if 0 <= index < len(q):
+            q.pop(index)
+        st["queue"] = q
+        return st
+    _update_backfill_state(db_path, f)
+
+
+def request_stop(db_path):
+    # stop the running job AND drop anything queued
+    _update_backfill_state(db_path, lambda st: {**st, "stop": True,
+                                                "queue": []})
+
+
+def clear_stop(db_path):
+    _update_backfill_state(db_path, lambda st: {**st, "stop": False})
+
+
+def bucket_reason(msg):
+    """Map a raw provider/parse error to a coarse, chartable category."""
+    m = (msg or "").lower()
+    if any(k in m for k in ("401", "user not found", "invalid api key",
+                            "unauthorized", "no api key", "403")):
+        return "auth"
+    if any(k in m for k in ("429", "rate", "quota", "limit")):
+        return "rate-limit"
+    if any(k in m for k in ("empty", "non-json", "expecting value",
+                            "overloaded", "unexpected response")):
+        return "empty/overload"
+    if any(k in m for k in ("connection", "timed out", "timeout", "urlopen",
+                            "refused", "network")):
+        return "network"
+    if any(k in m for k in ("json", "parse", "no json object", "card",
+                            "shape")):
+        return "parse"
+    return "other"
+
+
+def log_attempt(db_path, prompt_id, provider, model, ok, reason=None):
+    """One row per card-generation attempt — powers the dashboard health
+    panel (success rate + failure reasons per provider x model). Never
+    raises; telemetry must not break a backfill."""
+    try:
+        c = fdb.connect(db_path)
+        c.execute("INSERT INTO card_attempts(prompt_id, provider, model, ok,"
+                  " reason) VALUES(?,?,?,?,?)",
+                  (prompt_id, provider, model, 1 if ok else 0, reason))
+        c.commit()
+        c.close()
+    except Exception:
+        pass
+
+
 def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
               model=None, on_progress=None, dry_run: bool = False,
               thread_retries: int = 3, backoff_schedule=RUN_BACKOFFS,
@@ -143,7 +249,7 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
     {done, total, generated, failed} — drives UI progress bars."""
     import time as _time
     sleep_fn = sleep_fn or _time.sleep
-    load_env()
+    load_env(override=True)  # hot-reload .env each run — new key, no restart
     stats = {"generated": 0, "failed": 0, "skipped_existing": 0,
              "candidates": 0, "errors": [], "aborted": False}
     conn = fdb.connect(db_path)
@@ -170,11 +276,18 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
         # progress lives in the DB so ANY ui (dashboard, CLI, another
         # process) can see what's running, who started it, and how far
         try:
-            state = {"project": project, "session": session,
+            c2 = fdb.connect(db_path)
+            row = c2.execute("SELECT value FROM meta "
+                             "WHERE key='backfill_state'").fetchone()
+            try:
+                prev = json.loads(row[0]) if row else {}
+            except Exception:
+                prev = {}
+            # merge so queue + stop flag survive every progress write
+            state = {**prev, "project": project, "session": session,
                      "provider": provider, "model": model,
                      "total": stats["candidates"],
                      "updated": __import__("time").time(), **extra}
-            c2 = fdb.connect(db_path)
             c2.execute("INSERT OR REPLACE INTO meta(key, value) "
                        "VALUES('backfill_state', ?)", (json.dumps(state),))
             c2.commit()
@@ -202,7 +315,10 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
     stats["stopped"] = False
     consecutive_failures = 0
     for i, (prompt_id, est_tokens) in enumerate(todo, 1):
-        if should_stop and should_stop():
+        # honor an in-process stop AND a DB stop flag — so a stop issued
+        # from the dashboard halts this run even when it was started from
+        # the CLI or a different process
+        if (should_stop and should_stop()) or read_backfill_state(db_path).get("stop"):
             stats["stopped"] = True
             if on_progress:
                 on_progress("stopped by user — re-run to resume")
@@ -243,11 +359,18 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
             except CardError as e:
                 last_err = e
                 break
+            except Exception as e:
+                # defensive: a malformed/empty provider response must never
+                # crash the whole backfill — record it as a thread failure
+                last_err = e
+                break
 
         if card is None:
             stats["failed"] += 1
             stats["errors"].append({"prompt_id": prompt_id,
                                     "error": str(last_err)})
+            log_attempt(db_path, prompt_id, provider, resolved_model, False,
+                        bucket_reason(str(last_err)))
             if on_progress:
                 on_progress(f"  FAILED {prompt_id}: {str(last_err)[:140]}")
             if on_state:
@@ -274,9 +397,12 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
         except sqlite3.OperationalError as e:
             stats["failed"] += 1
             stats["errors"].append({"prompt_id": prompt_id, "error": str(e)})
+            log_attempt(db_path, prompt_id, provider, resolved_model, False,
+                        "db")
             continue
         consecutive_failures = 0
         stats["generated"] += 1
+        log_attempt(db_path, prompt_id, provider, resolved_model, True)
         if on_state:
             on_state({"done": i, "total": len(todo),
                       "generated": stats["generated"],
@@ -312,6 +438,8 @@ def cmd_cards(args):
     def progress(msg):
         print(msg, flush=True)
 
+    if not args.dry_run:
+        clear_stop(args.db)  # a prior dashboard stop must not kill a fresh CLI run
     stats = run_cards(args.db, limit=args.limit, min_tokens=args.min_tokens,
                       model=args.model, on_progress=progress,
                       dry_run=args.dry_run,
