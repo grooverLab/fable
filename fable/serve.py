@@ -256,6 +256,18 @@ def post_tags_blacklist(db_path, body):
     return {"ok": True, "blacklisted": f"{fam}:{val}"}
 
 
+def post_tags_autopromote(db_path, body):
+    """Auto-triage: promote every proposed value seen in >= threshold threads."""
+    from fable import taxonomy as tax
+    threshold = int(body.get("threshold", 10) or 10)
+    promoted = []
+    for p in api_tags_proposed(db_path, {}).get("proposed", []):
+        if p["threads"] >= threshold:
+            tax.promote(p["family"], p["value"])
+            promoted.append(f"{p['family']}:{p['value']}")
+    return {"ok": True, "count": len(promoted), "promoted": promoted}
+
+
 def _session_cwd(db_path, session_id):
     """The real cwd of a session, read from its transcript records."""
     live = _live_path(db_path, session_id)
@@ -853,6 +865,7 @@ def _grade(fails):
 
 
 def api_cards(db_path, params):
+    tag = (params.get("tag") or [None])[0]
     conn = fdb.connect(db_path)
     try:
         rows = _rows(conn, """
@@ -867,11 +880,25 @@ def api_cards(db_path, params):
                 "FROM card_attempts WHERE prompt_id IS NOT NULL "
                 "GROUP BY prompt_id"):
             att[pid] = (n, ok)
+        tagmap = {}
+        for pid, fam, val in conn.execute(
+                "SELECT prompt_id, family, value FROM thread_tags "
+                "ORDER BY family"):
+            tagmap.setdefault(pid, []).append(f"{fam}:{val}")
         for r in rows:
             n, ok = att.get(r["prompt_id"], (1, 1))
             r["gen_attempts"] = n
             r["gen_fails"] = max(0, n - ok)
             r["grade"] = _grade(r["gen_fails"])
+            r["tags"] = tagmap.get(r["prompt_id"], [])
+        if tag:
+            fam, sep, val = tag.partition(":")
+            if sep and val:
+                key = f"{fam}:{val}"
+                rows = [r for r in rows if key in r["tags"]]
+            else:
+                rows = [r for r in rows
+                        if any(t.split(":", 1)[-1] == fam for t in r["tags"])]
         return rows
     finally:
         conn.close()
@@ -1763,6 +1790,7 @@ POST_ROUTES["/api/cards/dequeue"] = post_cards_dequeue
 POST_ROUTES["/api/cards/job"] = post_cards_job
 POST_ROUTES["/api/tags/promote"] = post_tags_promote
 POST_ROUTES["/api/tags/blacklist"] = post_tags_blacklist
+POST_ROUTES["/api/tags/autopromote"] = post_tags_autopromote
 ROUTES["/api/backfill"] = api_backfill_progress
 
 

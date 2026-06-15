@@ -370,6 +370,7 @@ button.danger:hover{background:#ff8557}
     <button class="tab" data-tab="editor" title="Context Editor"><i>◐</i><span>EDIT</span></button>
     <button class="tab" data-tab="files" title="Files — time-travel diffs"><i>▤</i><span>FILES</span></button>
     <button class="tab" data-tab="cards" title="Cards — AI summaries"><i>▦</i><span>CARDS</span></button>
+    <button class="tab" data-tab="triage" title="Triage — review &amp; promote invented tags"><i>⊺</i><span>TRIAGE</span></button>
     <button class="tab" data-tab="prune" title="Prune — slim a session"><i>⚗</i><span>PRUNE</span></button>
     <button class="tab" data-tab="compose" title="Compose / Loom"><i>⊞</i><span>LOOM</span><span class="tabbadge" id="bk-count" style="display:none"></span></button>
     <button class="tab" data-tab="graph" title="Graph"><i>◌</i><span>GRAPH</span></button>
@@ -669,6 +670,7 @@ button.danger:hover{background:#ff8557}
       <div id="ft-out"><div class="empty"><span class="big">&ldquo;Every file has a story.&rdquo;</span>type a path to read it</div></div>
     </section>
     <section id="view-cards" style="display:none"><div class="loading">loading cards…</div></section>
+    <section id="view-triage" style="display:none"><div class="loading">loading triage…</div></section>
 
     <section id="view-costs" style="display:none"><div class="loading">computing telemetry…</div></section>
 
@@ -763,11 +765,12 @@ function showTab(name){
   activeTab=name;
   if($("#bb-tab"))$("#bb-tab").textContent=name;
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
-  for(const v of ["search","thread","compose","graph","editor","prune","files","cards","costs","settings","stats","logs"])
+  for(const v of ["search","thread","compose","graph","editor","prune","files","cards","triage","costs","settings","stats","logs"])
     $("#view-"+v).style.display="none";
   $("#view-"+(name==="search"&&currentThread==="open"?"thread":name)).style.display="";
   if(name==="compose")renderLoom();
   if(name==="cards")loadCards();
+  if(name==="triage")loadTriage();
   if(name==="stats")loadStats();
   if(name==="logs")loadLogs();
   if(name==="graph"){loadGraph().then(()=>{
@@ -1241,7 +1244,7 @@ $("#g-reload")&&($("#g-reload").onclick=()=>loadGraph(true));
 document.addEventListener("change",e=>{if(e.target.id==="g-session")loadGraph(true)});
 let GRAPH_DATA=null;
 const GRAPH_ON={file:true,topic:true,wikilink:true,semantic:true,citation:true,tag:true};
-const GCOLOR={thread:"#ffb454",file:"#6cc7d9",topic:"#7dd87d",wikilink:"#b48ce0",tag:"#e0719c"};
+const GCOLOR={thread:"#ffb454",file:"#6cc7d9",topic:"#7dd87d",wikilink:"#b48ce0",tag:"#ff79c6"};
 function ensureGraphToggles(){
   if($("#g-toggles"))return;
   const bar=document.createElement("div");
@@ -1282,7 +1285,7 @@ function drawGraph(raw){
   // not drag the whole graph to the middle — normalize pull by degree
   const deg={};
   data.links.forEach(l=>{deg[l.source]=(deg[l.source]||0)+1;deg[l.target]=(deg[l.target]||0)+1});
-  const R=d=>d.group==="thread"?Math.min(16,5+Math.sqrt((d.tokens||10)/60)):4+Math.min(8,(d.df||1));
+  const R=d=>d.group==="thread"?Math.min(16,5+Math.sqrt((d.tokens||10)/60)):d.group==="tag"?8+Math.min(13,(d.df||1)*1.5):4+Math.min(8,(d.df||1));
   const sim=d3.forceSimulation(data.nodes)
     .force("link",d3.forceLink(data.links).id(d=>d.id)
       .distance(l=>l.kind==="citation"?70:l.kind==="semantic"?90:120)
@@ -1306,10 +1309,10 @@ function drawGraph(raw){
   const tip=d3.select("body").append("div").attr("class","gtip").style("display","none");
   const node=g.append("g").selectAll("circle").data(data.nodes).join("circle")
     .attr("class","gnode")
-    .attr("r",d=>d.group==="thread"?Math.min(16,5+Math.sqrt((d.tokens||10)/60)):4+Math.min(8,(d.df||1)))
+    .attr("r",d=>d.group==="thread"?Math.min(16,5+Math.sqrt((d.tokens||10)/60)):d.group==="tag"?8+Math.min(13,(d.df||1)*1.5):4+Math.min(8,(d.df||1)))
     .attr("fill",d=>d.group==="thread"?"#171b22":color[d.group]||"#555")
-    .attr("stroke",d=>d.group==="thread"?color.thread:"none")
-    .attr("stroke-width",1.6)
+    .attr("stroke",d=>d.group==="thread"?color.thread:d.group==="tag"?"#ffd0ec":"none")
+    .attr("stroke-width",d=>d.group==="tag"?2.4:1.6)
     .on("mouseover",(e,d)=>tip.style("display","block")
       .html(d.group==="thread"
         ?`<b>${esc(d.label)}</b><br>${d.turns||"?"} turns · ~${fmt(d.tokens)} tok · ${esc(d.type||"")}`
@@ -1989,17 +1992,47 @@ function colorize(text){
 }
 
 /* ── cards tab ── */
+let CARDS_SESSION=null, CARDS_TAG="", CARDS_FACETS=null;
 async function loadCards(session){
+  if(session!==undefined)CARDS_SESSION=session;
   const view=$("#view-cards");
-  let cards=await api("/api/cards");
-  if(session)cards=cards.filter(c=>c.session_id===session);
-  const hdr=session?`<div class="hint" style="margin-bottom:10px">▦ cards in <b>${esc(SESSION_TITLES[session]||session.slice(0,10)+'…')}</b> · ${cards.length} · <span class="bf-btn" onclick="loadCards()">show all cards</span></div>`:"";
-  view.innerHTML=cards.length?hdr+`<div class="results">${cards.map(c=>hitHtml({
+  if(!CARDS_FACETS)CARDS_FACETS=await api("/api/facets").catch(()=>({tags:[]}));
+  let cards=await api("/api/cards", CARDS_TAG?{tag:CARDS_TAG}:{});
+  if(CARDS_SESSION)cards=cards.filter(c=>c.session_id===CARDS_SESSION);
+  const tagSel=`<select id="cards-tag" title="2nd-order filter: cards carrying a tag" onchange="CARDS_TAG=this.value;loadCards()"><option value="">tag: all</option>${((CARDS_FACETS&&CARDS_FACETS.tags)||[]).map(t=>`<option value="${esc(t)}"${t===CARDS_TAG?" selected":""}>${esc(t)}</option>`).join("")}</select>`;
+  const hdr=`<div class="hint" style="margin-bottom:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">${tagSel}${CARDS_SESSION?`<span>▦ <b>${esc(SESSION_TITLES[CARDS_SESSION]||CARDS_SESSION.slice(0,10)+'…')}</b> <span class="bf-btn" onclick="CARDS_SESSION=null;loadCards()">show all</span></span>`:""}<span style="margin-left:auto">${cards.length} card${cards.length===1?"":"s"}</span></div>`;
+  view.innerHTML=hdr+(cards.length?`<div class="results">${cards.map(c=>hitHtml({
     prompt_id:c.prompt_id,title:c.title,type:c.type,outcome:c.outcome,
     turn_count:c.turn_count,est_tokens:c.est_tokens,first_ts:c.first_ts,
     sidechain_turns:c.sidechain_turns,models:c.models,project:c.project,
-    grade:c.grade,gen_attempts:c.gen_attempts,gen_fails:c.gen_fails
-  })).join("")}</div>`:(session?hdr+'<div class="empty">no cards for this session yet — the live-carding worker will fill them in</div>':'<div class="empty"><span class="big">no cards yet</span>add OPENROUTER_API_KEY to .env and run: fable cards run — or hit ✦ cards next to a project in the sidebar</div>');
+    grade:c.grade,gen_attempts:c.gen_attempts,gen_fails:c.gen_fails,tags:c.tags
+  })).join("")}</div>`:'<div class="empty">no cards match this filter</div>');
+}
+async function loadTriage(){
+  const view=$("#view-triage");
+  const d=await api("/api/tags/proposed").catch(()=>({proposed:[],total:0}));
+  const prop=(d&&d.proposed)||[];
+  const byFam={};
+  prop.forEach(p=>{(byFam[p.family]=byFam[p.family]||[]).push(p)});
+  const fams=Object.keys(byFam).sort((a,b)=>byFam[b].length-byFam[a].length);
+  const chip=p=>`<span class="badge" style="margin:2px 3px">${esc(p.value)} <span style="color:var(--dim)">${p.threads}</span> <span class="bf-btn" style="color:var(--green)" title="promote to known vocabulary" onclick="promoteTag('${esc(p.family)}','${esc(p.value)}')">✓</span> <span class="bf-btn" style="color:var(--ember)" title="dismiss (blacklist)" onclick="dismissTag('${esc(p.family)}','${esc(p.value)}')">✕</span></span>`;
+  view.innerHTML=`<div style="margin-bottom:14px"><b style="color:var(--phos);font:600 16px var(--serif)">Triage</b><span class="hint"> · ${d.total||0} invented tags across ${fams.length} families · <b>domain</b> is locked (never appears here)</span></div>
+    <div class="genwrap" style="margin-bottom:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b style="color:var(--phos)">auto-triage</b><span class="hint">promote everything seen in ≥</span>
+      <input id="tri-thresh" type="number" value="10" min="2" style="width:58px">
+      <span class="hint">threads →</span>
+      <button class="ghost" onclick="autoPromote()">promote all above threshold</button>
+      <span class="hint" style="margin-left:auto">promoted values become known vocab the carder prefers next run</span></div>
+    ${fams.length?fams.map(f=>`<div class="genwrap" style="margin-bottom:10px"><b style="color:var(--cyan)">${esc(f)}</b> <span class="hint">${byFam[f].length}</span><div style="margin-top:8px">${byFam[f].slice(0,100).map(chip).join("")}</div></div>`).join(""):'<div class="empty">nothing to triage — every tag is already known vocabulary</div>'}`;
+}
+async function autoPromote(){
+  const th=parseInt(($("#tri-thresh")||{}).value)||10;
+  const r=await fetch("/api/tags/autopromote",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({threshold:th})}).then(x=>x.json());
+  toast(`promoted ${r.count} tags seen in ≥${th} threads`);loadTriage();
+}
+function refreshTriage(){
+  if($("#view-triage")&&$("#view-triage").style.display!=="none")loadTriage();
+  else if($("#dash-tags"))loadTagPanel();
 }
 
 /* ── Dashboard tab: full usage + cost telemetry ── */
@@ -2139,11 +2172,11 @@ async function loadTagPanel(){
 }
 async function promoteTag(f,v){
   await fetch("/api/tags/promote",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({family:f,value:v})});
-  toast(`promoted ${f}:${v} → known vocab`);loadTagPanel();
+  toast(`promoted ${f}:${v} → known vocab`);refreshTriage();
 }
 async function dismissTag(f,v){
   await fetch("/api/tags/blacklist",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({family:f,value:v})});
-  toast(`dismissed ${f}:${v}`);loadTagPanel();
+  toast(`dismissed ${f}:${v}`);refreshTriage();
 }
 async function loadCardHealth(){
   const el=$("#card-health");if(!el)return;
