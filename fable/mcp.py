@@ -125,6 +125,71 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "fable_recall",
+        "description": (
+            "Read the durable facts the user stored via /remember (the READ "
+            "side of fable_remember) — lasting preferences, decisions and "
+            "constraints, the same ones auto-injected at session start. Call "
+            "to re-check what the user has committed to before assuming. "
+            "Optionally scope to a project."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description":
+                            "scope to a project (omit for all/global)"},
+            },
+        },
+    },
+    {
+        "name": "fable_files",
+        "description": (
+            "List the files Claude has edited — across the whole archive, or "
+            "within one session — with edit/write counts and last-touched "
+            "time. Use to DISCOVER what a past session changed before pulling "
+            "a file's history. Filter by a path substring or a session id."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description":
+                          "path substring filter, e.g. serve.py"},
+                "session_id": {"type": "string", "description":
+                               "limit to one session's files"},
+                "limit": {"type": "integer", "default": 40},
+            },
+        },
+    },
+    {
+        "name": "fable_file_history",
+        "description": (
+            "EVERY version of a file Claude ever edited, reconstructed from "
+            "the transcript — each version's index, timestamp, tool, session "
+            "and fidelity (exact replay vs rebuilt-backward). Use to see how a "
+            "file evolved, or to find the two version indices to diff. Pass a "
+            "file path (or a distinctive substring of it)."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "fable_file_diff",
+        "description": (
+            "Unified diff between any two reconstructed versions of a file "
+            "(version indices from fable_file_history) — recover exactly what "
+            "changed between two past edits, or between a past version and the "
+            "latest. Pass the file path and the two version indices a and b."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "a": {"type": "integer", "description": "before version index"},
+                "b": {"type": "integer", "description": "after version index"},
+            },
+            "required": ["path", "a", "b"],
+        },
+    },
 ]
 
 
@@ -188,6 +253,32 @@ def _call_tool(db_path, name, args):
                              budget=int(args.get("budget", 12000)),
                              max_threads=int(args.get("max_threads", 5)),
                              project=args.get("project"))
+    if name == "fable_recall":
+        from fable.facts import list_facts
+        return json.dumps(list_facts(db_path, project=args.get("project")),
+                          indent=1)
+    if name == "fable_files":
+        from fable.filetime import known_files, session_files
+        sid = args.get("session_id")
+        rows = (session_files(db_path, sid) if sid
+                else known_files(db_path, args.get("query", ""),
+                                 limit=int(args.get("limit", 40))))
+        return json.dumps(rows, indent=1)
+    if name == "fable_file_history":
+        from fable.filetime import file_events, reconstruct
+        versions = reconstruct(file_events(db_path, args["path"]))
+        return json.dumps([
+            {"i": i, "ts": v.get("ts"), "tool": v.get("tool"),
+             "ok": v.get("ok"), "derived": bool(v.get("derived")),
+             "note": v.get("note"), "bytes": v.get("bytes"),
+             "session_id": v.get("session_id"),
+             "prompt_id": v.get("prompt_id")}
+            for i, v in enumerate(versions)], indent=1)
+    if name == "fable_file_diff":
+        from fable.filetime import file_events, reconstruct, file_diff
+        versions = reconstruct(file_events(db_path, args["path"]))
+        return "\n".join(
+            file_diff(versions, int(args["a"]), int(args["b"])))
     raise KeyError(f"unknown tool: {name}")
 
 
