@@ -153,12 +153,16 @@ CREATE TABLE IF NOT EXISTS facts(
   active INTEGER DEFAULT 1
 );
 
--- semantic layer: card embeddings (packed float32), backend-tagged
+-- semantic layer: per-thread vectors (packed float32), backend-tagged.
+-- kind='card' (distilled summary) and kind='thread' (the conversation's own
+-- text) coexist; semantic_hits takes the best match per thread.
 CREATE TABLE IF NOT EXISTS embeddings(
-  prompt_id TEXT PRIMARY KEY,
+  prompt_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'card',
   vec BLOB NOT NULL,
   dim INTEGER NOT NULL,
-  backend TEXT
+  backend TEXT,
+  PRIMARY KEY(prompt_id, kind)
 );
 """
 
@@ -182,6 +186,23 @@ def connect(path: str, create: bool = False) -> sqlite3.Connection:
             conn.execute(ddl)
         except sqlite3.OperationalError:
             pass  # column already exists
+    # migrate the embeddings table to the composite (prompt_id, kind) key so
+    # card- and thread-vectors can coexist; existing rows become kind='card'
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(embeddings)")]
+        if cols and "kind" not in cols:
+            conn.executescript(
+                "ALTER TABLE embeddings RENAME TO _embeddings_old;"
+                "CREATE TABLE embeddings(prompt_id TEXT NOT NULL,"
+                " kind TEXT NOT NULL DEFAULT 'card', vec BLOB NOT NULL,"
+                " dim INTEGER NOT NULL, backend TEXT,"
+                " PRIMARY KEY(prompt_id, kind));"
+                "INSERT INTO embeddings(prompt_id,kind,vec,dim,backend)"
+                " SELECT prompt_id,'card',vec,dim,backend FROM _embeddings_old;"
+                "DROP TABLE _embeddings_old;")
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 

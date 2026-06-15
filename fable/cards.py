@@ -125,6 +125,16 @@ def generate_card(db_path: str, prompt_id: str, provider="openrouter",
 # retries (e.g. free-tier daily caps): wait, then retry the SAME thread
 RUN_BACKOFFS = (60, 300, 900)
 ABORT_AFTER_CONSECUTIVE = 10
+# large free OpenRouter models to round-robin across when one is congested
+# (per-model rate-limits are independent; the daily account cap is shared).
+# Skips tiny models (laguna/xs) — these are 30B+ and the 120B gpt-oss.
+FREE_ROTATION = [
+    "openai/gpt-oss-120b:free",     # proven workhorse — 120B, fast, headroom
+    "qwen/qwen3-coder:free",        # coder → tightest JSON/schema adherence
+    "google/gemma-4-31b-it:free",   # baseline-quality, but congested endpoint
+    "nex-agi/nex-n2-pro:free",      # last resort — was overloaded in testing
+    # dropped: glm-4.5-air:free + kimi-k2.6:free → OpenRouter 404 (paid-only now)
+]
 
 
 def _is_rate_limited(err) -> bool:
@@ -201,6 +211,15 @@ def request_stop(db_path):
 
 def clear_stop(db_path):
     _update_backfill_state(db_path, lambda st: {**st, "stop": False})
+
+
+def request_pause(db_path):
+    # stop draining but KEEP the queue — resume re-cards whatever remains
+    _update_backfill_state(db_path, lambda st: {**st, "paused": True})
+
+
+def clear_pause(db_path):
+    _update_backfill_state(db_path, lambda st: {**st, "paused": False})
 
 
 def bucket_reason(msg):
@@ -314,6 +333,11 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
     from fable.providers import ProviderError
     stats["stopped"] = False
     consecutive_failures = 0
+    if provider == "openrouter":
+        rotation = list(dict.fromkeys(([model] if model else []) + FREE_ROTATION))
+    else:
+        rotation = [model]
+    rot_i = 0
     for i, (prompt_id, est_tokens) in enumerate(todo, 1):
         # honor an in-process stop AND a DB stop flag — so a stop issued
         # from the dashboard halts this run even when it was started from
@@ -325,16 +349,13 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
             break
         if on_progress:
             on_progress(f"[{i}/{len(todo)}] {prompt_id} (~{est_tokens}tok)")
-        if provider == "openrouter":
-            resolved_model = (model or os.environ.get("OPENROUTER_MODEL")
-                              or DEFAULT_MODEL)
-        else:
-            resolved_model = f"{provider}:{model or 'haiku'}"
-
         card, last_err = None, None
         for attempt in range(thread_retries + 1):
+            cur_model = rotation[rot_i % len(rotation)]
+            resolved_model = (cur_model if provider == "openrouter"
+                              else f"{provider}:{cur_model or 'haiku'}")
             try:
-                card = generate_card(db_path, prompt_id, model=model,
+                card = generate_card(db_path, prompt_id, model=cur_model,
                                      provider=provider, **chat_kw)
                 break
             except RuntimeError as e:
@@ -348,12 +369,17 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
             except (OpenRouterError, ProviderError) as e:
                 last_err = e
                 if _is_rate_limited(e) and attempt < thread_retries:
-                    wait = backoff_schedule[
-                        min(attempt, len(backoff_schedule) - 1)]
-                    if on_progress:
-                        on_progress(f"  rate limited — backing off {wait}s "
-                                    f"(attempt {attempt + 1})")
-                    sleep_fn(wait)
+                    rot_i += 1   # this free model is congested — try the next
+                    if rot_i % len(rotation) == 0:
+                        wait = backoff_schedule[
+                            min(attempt, len(backoff_schedule) - 1)]
+                        if on_progress:
+                            on_progress(f"  all {len(rotation)} free models "
+                                        f"rate-limited — backing off {wait}s")
+                        sleep_fn(wait)
+                    elif on_progress:
+                        on_progress("  rate-limited — failover to "
+                                    + rotation[rot_i % len(rotation)])
                     continue
                 break
             except CardError as e:

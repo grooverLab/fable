@@ -18,9 +18,11 @@ class OpenRouterError(Exception):
 
 
 def env_path() -> str:
-    """Canonical .env location: FABLE_ENV override, else <repo-root>/.env."""
-    return os.environ.get("FABLE_ENV") or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    """Canonical .env location: FABLE_ENV override, else ~/.fable/.env."""
+    if os.environ.get("FABLE_ENV"):
+        return os.environ["FABLE_ENV"]
+    from fable.paths import home
+    return os.path.join(home(), ".env")
 
 
 def save_env(updates: dict) -> str:
@@ -54,7 +56,9 @@ def load_env(path: str = None, override: bool = False) -> None:
 
     Default search order: FABLE_ENV, ./.env, then <repo-root>/.env."""
     if path is None:
-        for candidate in (env_path(), ".env"):
+        repo_env = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+        for candidate in (env_path(), repo_env, ".env"):
             if candidate and os.path.exists(candidate):
                 path = candidate
                 break

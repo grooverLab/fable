@@ -134,6 +134,43 @@ def _upsert_record(conn, obj, file_id, lineno, offset, length,
          usage.get("cache_creation_input_tokens")))
 
 
+def _index_one(conn, obj, file_id, lineno, offset, length, stats,
+               extract_fn=None, session_id=None):
+    """Index a single record: record its copy, and (if it's the fullest copy)
+    its denormalized pointer + FTS. Returns the uuid, or None if skipped."""
+    uuid = obj.get("uuid")
+    if not uuid and obj.get("type") == "file-history-snapshot":
+        # rewind checkpoints: tiny records pointing at full on-disk file
+        # backups (~/.claude/file-history) — gold anchors for file
+        # time-travel. Synthesize a stable identity.
+        snap = obj.get("snapshot") or {}
+        if snap.get("trackedFileBackups"):
+            uuid = (f"fhs:{obj.get('messageId', '?')}:"
+                    f"{snap.get('timestamp', '?')}")
+            obj["uuid"] = uuid
+            obj.setdefault("timestamp", snap.get("timestamp"))
+    if not uuid:
+        stats["skipped_no_uuid"] += 1
+        return None
+    stats["records_seen"] += 1
+
+    conn.execute(
+        "INSERT INTO copies(uuid, file_id, lineno, offset, length) "
+        "VALUES(?,?,?,?,?) ON CONFLICT(uuid, file_id) DO UPDATE SET"
+        " lineno=excluded.lineno, offset=excluded.offset,"
+        " length=excluded.length WHERE excluded.length >= copies.length",
+        (uuid, file_id, lineno, offset, length))
+
+    existing = conn.execute(
+        "SELECT fidelity FROM records WHERE uuid = ?", (uuid,)).fetchone()
+    if existing is not None and length <= existing[0]:
+        return uuid  # safe: the fuller copy is recorded in `copies`
+    _upsert_record(conn, obj, file_id, lineno, offset, length,
+                   extract_fn=extract_fn, session_id=session_id)
+    stats["records_indexed"] += 1
+    return uuid
+
+
 def _index_file(conn, path: str, file_id: int, stats, extract_fn=None,
                 session_id=None):
     for rec in iter_records(path, on_error=lambda ln, e: stats.__setitem__(
@@ -141,36 +178,8 @@ def _index_file(conn, path: str, file_id: int, stats, extract_fn=None,
         obj = rec.obj
         if not stats.get("session_id") and obj.get("sessionId"):
             stats["session_id"] = obj["sessionId"]
-        uuid = obj.get("uuid")
-        if not uuid and obj.get("type") == "file-history-snapshot":
-            # rewind checkpoints: tiny records pointing at full on-disk file
-            # backups (~/.claude/file-history) — gold anchors for file
-            # time-travel. Synthesize a stable identity.
-            snap = obj.get("snapshot") or {}
-            if snap.get("trackedFileBackups"):
-                uuid = (f"fhs:{obj.get('messageId', '?')}:"
-                        f"{snap.get('timestamp', '?')}")
-                obj["uuid"] = uuid
-                obj.setdefault("timestamp", snap.get("timestamp"))
-        if not uuid:
-            stats["skipped_no_uuid"] += 1
-            continue
-        stats["records_seen"] += 1
-
-        conn.execute(
-            "INSERT INTO copies(uuid, file_id, lineno, offset, length) "
-            "VALUES(?,?,?,?,?) ON CONFLICT(uuid, file_id) DO UPDATE SET"
-            " lineno=excluded.lineno, offset=excluded.offset,"
-            " length=excluded.length WHERE excluded.length >= copies.length",
-            (uuid, file_id, rec.lineno, rec.offset, rec.length))
-
-        existing = conn.execute(
-            "SELECT fidelity FROM records WHERE uuid = ?", (uuid,)).fetchone()
-        if existing is not None and rec.length <= existing[0]:
-            continue  # safe: the fuller copy is recorded in `copies`
-        _upsert_record(conn, obj, file_id, rec.lineno, rec.offset, rec.length,
-                       extract_fn=extract_fn, session_id=session_id)
-        stats["records_indexed"] += 1
+        _index_one(conn, obj, file_id, rec.lineno, rec.offset, rec.length,
+                   stats, extract_fn=extract_fn, session_id=session_id)
 
 
 def _drop_fts(conn, uuid):
@@ -371,3 +380,167 @@ def index_vault(db_path: str,
     finally:
         conn.close()
     return stats
+
+
+# ── incremental turn-boundary indexing (roadmap #1) ──────────────────────
+#
+# An ACTIVE session's live file outgrows the index between triggers. Re-running
+# index_vault per turn is too slow — _index_file re-parses the whole file and
+# rebuild_threads re-resolves membership over the ENTIRE db. So instead: read
+# only the bytes appended since last time, index those records (pointers, no
+# copy), resolve their thread membership against already-indexed ancestors, and
+# refresh ONLY the touched threads. O(new records), runs inside a Stop hook.
+
+
+def _index_tail(conn, path, file_id, start_offset, start_lineno, stats,
+                extract_fn=None):
+    """Index only records appended after start_offset. Returns
+    (new_uuids, safe_end): safe_end is the end of the last fully-parsed line,
+    so a trailing partial line (mid-write) is left for the next pass."""
+    dec = json.JSONDecoder()
+    new_uuids, safe_end = [], start_offset
+    with open(path, "rb") as f:
+        f.seek(start_offset)
+        pos, lineno = start_offset, start_lineno
+        for raw in f:
+            lineno += 1
+            line_start = pos
+            pos += len(raw)
+            if not raw.strip():
+                safe_end = pos
+                continue
+            text = raw.decode("utf-8", errors="surrogateescape")
+            p, line_ok = 0, True
+            while p < len(text):
+                while p < len(text) and text[p] in " \t\r\n":
+                    p += 1
+                if p >= len(text):
+                    break
+                try:
+                    obj, end = dec.raw_decode(text, p)
+                except json.JSONDecodeError:
+                    stats["parse_errors"] += 1
+                    line_ok = False
+                    break  # trailing partial — stop, re-read this line later
+                byte_off = line_start + len(
+                    text[:p].encode("utf-8", "surrogateescape"))
+                byte_len = len(
+                    text[p:end].encode("utf-8", "surrogateescape"))
+                if not stats.get("session_id") and obj.get("sessionId"):
+                    stats["session_id"] = obj["sessionId"]
+                uuid = _index_one(conn, obj, file_id, lineno, byte_off,
+                                  byte_len, stats, extract_fn=extract_fn)
+                if uuid:
+                    new_uuids.append(uuid)
+                p = end
+            if line_ok:
+                safe_end = pos
+            else:
+                break
+    return new_uuids, safe_end
+
+
+def _resolve_new(conn, new_uuids):
+    """Resolve prompt_id for newly-appended records by walking each up to its
+    nearest already-indexed ancestor that has one. Returns the set of threads
+    (prompt_ids) touched. Cheap: every ancestor is already resolved."""
+    touched = set()
+    for uuid in new_uuids:
+        row = conn.execute(
+            "SELECT prompt_id, parent_uuid, source_uuid, fts_rowid "
+            "FROM records WHERE uuid = ?", (uuid,)).fetchone()
+        if not row:
+            continue
+        pid, parent, source, fts_rowid = row
+        if pid:
+            touched.add(pid)
+            continue
+        cur, seen, resolved = (parent or source), set(), None
+        while cur and cur not in seen:
+            seen.add(cur)
+            anc = conn.execute(
+                "SELECT prompt_id, parent_uuid, source_uuid "
+                "FROM records WHERE uuid = ?", (cur,)).fetchone()
+            if not anc:
+                break
+            if anc[0]:
+                resolved = anc[0]
+                break
+            cur = anc[1] or anc[2]
+        if resolved:
+            conn.execute("UPDATE records SET prompt_id = ? WHERE uuid = ?",
+                         (resolved, uuid))
+            if fts_rowid:
+                conn.execute("UPDATE fts SET prompt_id = ? WHERE rowid = ?",
+                             (resolved, fts_rowid))
+            touched.add(resolved)
+    return touched
+
+
+_THREAD_AGG = """
+    INSERT INTO threads(prompt_id, first_ts, last_ts, turn_count,
+                        text_bytes, est_tokens, first_uuid, leaf_uuid,
+                        session_id, sidechain_turns, models)
+    SELECT prompt_id, MIN(ts), MAX(ts), COUNT(*),
+           SUM(text_bytes), SUM(text_bytes) / 4,
+           (SELECT uuid FROM records r2 WHERE r2.prompt_id = r.prompt_id
+            ORDER BY r2.ts_epoch ASC, r2.lineno ASC LIMIT 1),
+           (SELECT uuid FROM records r3 WHERE r3.prompt_id = r.prompt_id
+            ORDER BY r3.ts_epoch DESC, r3.lineno DESC LIMIT 1),
+           MAX(session_id), SUM(is_sidechain),
+           (SELECT GROUP_CONCAT(DISTINCT model) FROM records r4
+            WHERE r4.prompt_id = r.prompt_id AND r4.model IS NOT NULL)
+    FROM records r WHERE prompt_id = ? GROUP BY prompt_id
+"""
+
+
+def _refresh_threads(conn, prompt_ids):
+    """Re-aggregate only the given threads, not the whole table."""
+    for pid in prompt_ids:
+        conn.execute("DELETE FROM threads WHERE prompt_id = ?", (pid,))
+        conn.execute(_THREAD_AGG, (pid,))
+
+
+def index_live_tail(db_path: str, live_path: str, extract_fn=None) -> dict:
+    """Turn-boundary fast path: index only the turns appended to a live
+    transcript since it was last indexed. Falls back to a full index_vault
+    when the file shrank / was rewritten (prune, compaction, surgery) or isn't
+    known yet. Built to run inside a Stop / UserPromptSubmit hook."""
+    if not (live_path and os.path.exists(live_path)):
+        return {"mode": "absent", "new_records": 0}
+    cur_size = os.path.getsize(live_path)
+    conn = fdb.connect(db_path, create=True)
+    try:
+        row = conn.execute("SELECT id, size FROM files WHERE path = ?",
+                           (live_path,)).fetchone()
+    finally:
+        conn.close()
+    if row is None or cur_size < row[1]:
+        out = index_vault(db_path, [], live_file=live_path,
+                          extract_fn=extract_fn)
+        out["mode"] = "full"
+        return out
+    file_id, last_size = row
+    if cur_size == last_size:
+        return {"mode": "nochange", "new_records": 0}
+
+    conn = fdb.connect(db_path, create=True)
+    try:
+        stats = {"records_seen": 0, "records_indexed": 0,
+                 "skipped_no_uuid": 0, "parse_errors": 0}
+        max_lineno = conn.execute(
+            "SELECT COALESCE(MAX(lineno), 0) FROM copies WHERE file_id = ?",
+            (file_id,)).fetchone()[0]
+        new_uuids, safe_end = _index_tail(conn, live_path, file_id, last_size,
+                                          max_lineno, stats, extract_fn)
+        st = os.stat(live_path)
+        conn.execute("UPDATE files SET size = ?, mtime = ? WHERE id = ?",
+                     (safe_end, st.st_mtime, file_id))
+        touched = _resolve_new(conn, new_uuids)
+        _refresh_threads(conn, touched)
+        conn.commit()
+        stats.update(mode="tail", new_records=len(new_uuids),
+                     threads_touched=len(touched))
+        return stats
+    finally:
+        conn.close()

@@ -326,6 +326,12 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
         if session:
             results = [h for h in results
                        if (h["session_id"] or "").startswith(session)]
+        # normalize the unbounded BM25×weight (+cosine) sum into an honest
+        # 0-100, top hit = 100, so the number is comparable across queries
+        if fts_query is not None and results:
+            top = max((h["score"] or 0) for h in results) or 1
+            for h in results:
+                h["score_pct"] = round(100 * (h["score"] or 0) / top)
         results.sort(key=SORT_KEYS.get(sort, SORT_KEYS["relevance"]),
                      reverse=(sort == "recent"))
         fdb.log_op(db_path, "search", q=query or "", hits=len(results[:limit]))

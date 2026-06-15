@@ -59,8 +59,16 @@ def api_projects(db_path, params):
             FROM sessions s LEFT JOIN threads t ON t.session_id = s.session_id
             GROUP BY s.session_id
             ORDER BY s.project, pinned DESC, last_ts DESC""")
+        # dominant model per session — one grouped pass, pick the max in python
+        dom = {}
+        for sid, model, c in conn.execute(
+                "SELECT session_id, model, COUNT(*) FROM records "
+                "WHERE model IS NOT NULL GROUP BY session_id, model"):
+            if sid not in dom or c > dom[sid][1]:
+                dom[sid] = (model, c)
         projects = {}
         for s in sessions:
+            s["model"] = dom.get(s["session_id"], (None,))[0]
             projects.setdefault(s["project"] or "unknown", []).append(s)
         return [{"project": p, "sessions": ss} for p, ss in
                 sorted(projects.items())]
@@ -83,13 +91,27 @@ def api_threads(db_path, params):
     session = (params.get("session") or [None])[0]
     conn = fdb.connect(db_path)
     try:
-        return _rows(conn, """
+        rows = _rows(conn, """
             SELECT t.prompt_id, t.first_ts, t.last_ts, t.turn_count,
                    t.est_tokens, t.sidechain_turns, t.models,
-                   c.title, c.type, c.outcome
+                   c.title, c.type, c.outcome, c.summary
             FROM threads t LEFT JOIN cards c ON c.prompt_id = t.prompt_id
             WHERE t.session_id = ?
             ORDER BY t.first_ts""", (session,))
+        # grade each carded thread from generation health (clean=A, retries drop it)
+        att = {}
+        for pid, n, ok in conn.execute(
+                "SELECT prompt_id, COUNT(*), COALESCE(SUM(ok),0) "
+                "FROM card_attempts WHERE prompt_id IS NOT NULL "
+                "GROUP BY prompt_id"):
+            att[pid] = (n, ok)
+        for r in rows:
+            if r.get("title"):
+                n, ok = att.get(r["prompt_id"], (1, 1))
+                fails = max(0, n - ok)
+                r["grade"] = ("A" if fails == 0 else "B" if fails == 1
+                              else "C" if fails == 2 else "D")
+        return rows
     finally:
         conn.close()
 
@@ -654,15 +676,33 @@ def post_facts(db_path, body):
     return {"id": fid}
 
 
+def _grade(fails):
+    """Card quality from generation health: clean first try = A, each retry
+    that failed before success drops the letter."""
+    return "A" if fails <= 0 else "B" if fails == 1 else "C" if fails == 2 else "D"
+
+
 def api_cards(db_path, params):
     conn = fdb.connect(db_path)
     try:
-        return _rows(conn, """
+        rows = _rows(conn, """
             SELECT c.*, t.session_id, t.turn_count, t.first_ts,
                    t.sidechain_turns, t.models, s.project
             FROM cards c LEFT JOIN threads t ON t.prompt_id = c.prompt_id
             LEFT JOIN sessions s ON s.session_id = t.session_id
             ORDER BY t.first_ts DESC""")
+        att = {}
+        for pid, n, ok in conn.execute(
+                "SELECT prompt_id, COUNT(*), COALESCE(SUM(ok),0) "
+                "FROM card_attempts WHERE prompt_id IS NOT NULL "
+                "GROUP BY prompt_id"):
+            att[pid] = (n, ok)
+        for r in rows:
+            n, ok = att.get(r["prompt_id"], (1, 1))
+            r["gen_attempts"] = n
+            r["gen_fails"] = max(0, n - ok)
+            r["grade"] = _grade(r["gen_fails"])
+        return rows
     finally:
         conn.close()
 
@@ -716,7 +756,7 @@ def _live_path(db_path, session_id):
 
 
 def _default_backup_dir(db_path, session_id):
-    from fable.discover import DEFAULT_BACKUP_ROOTS
+    from fable.paths import vault_dir
     conn = fdb.connect(db_path)
     try:
         row = conn.execute(
@@ -725,11 +765,7 @@ def _default_backup_dir(db_path, session_id):
     finally:
         conn.close()
     project = (row[0] if row and row[0] else "manual")
-    for root in DEFAULT_BACKUP_ROOTS:
-        if os.path.isdir(root):
-            return os.path.join(root, project)
-    return os.path.join(os.path.dirname(os.path.abspath(db_path)),
-                        "backups", project)
+    return os.path.join(vault_dir(), project)
 
 
 # ── card backfill runner (one at a time, progress polled by the UI) ──
@@ -768,8 +804,11 @@ def _drain_worker(db_path):
     _WORKER["active"] = True
     try:
         while True:
-            if _c.read_backfill_state(db_path).get("stop"):
+            st0 = _c.read_backfill_state(db_path)
+            if st0.get("stop"):
                 break
+            if st0.get("paused"):
+                break   # paused: leave the queue intact, just stop draining
             job = _c.pop_job(db_path)
             if not job:
                 break
@@ -795,6 +834,11 @@ def _drain_worker(db_path):
                 BACKFILL["error"] = str(e)[:300]
             BACKFILL["running"] = False
             BACKFILL["finished"] = _time.time()
+            # paused mid-job → re-queue the partially-done job so resume
+            # re-cards whatever threads remain uncarded, then stop draining
+            if _c.read_backfill_state(db_path).get("paused"):
+                _c.enqueue_job(db_path, job)
+                break
     finally:
         _WORKER["active"] = False
         _c.clear_stop(db_path)
@@ -809,6 +853,7 @@ def post_cards_run(db_path, body):
     model = body.get("model") or None
     if provider not in PROVIDERS:
         raise ValueError(f"provider must be one of {PROVIDERS}")
+    LAST_PROVIDER[0] = provider
     dry = run_cards(db_path, project=project, session=session, dry_run=True)
     if not dry["candidates"]:
         raise ValueError("no uncarded threads in scope — nothing to do")
@@ -853,6 +898,27 @@ def post_cards_dequeue(db_path, body):
     return {"ok": True}
 
 
+def post_cards_pause(db_path, body):
+    # pause = stop draining + abort the current run gracefully (cards already
+    # generated are kept), but KEEP the queue so resume continues where it left
+    from fable.cards import request_pause
+    request_pause(db_path)
+    BACKFILL["stop_requested"] = True
+    return {"paused": True}
+
+
+def post_cards_resume(db_path, body):
+    from fable.cards import clear_pause, clear_stop
+    clear_pause(db_path)
+    clear_stop(db_path)
+    BACKFILL["stop_requested"] = False
+    with _BACKFILL_LOCK:
+        if not _WORKER["active"]:
+            threading.Thread(target=_drain_worker, args=(db_path,),
+                             daemon=True).start()
+    return {"resumed": True}
+
+
 def post_settings(db_path, body):
     """Save provider API keys from the dashboard into .env (0600)."""
     from fable.openrouter import save_env
@@ -884,6 +950,25 @@ def post_settings(db_path, body):
     return api_settings(db_path, {})
 
 
+def post_setup(db_path, body):
+    """Onboarding from the dashboard: point fable's vault at a chosen folder.
+
+    Writes ~/.fable/config.json (same as `fable setup`). The current vault is
+    auto-registered as a legacy read-root so older generations stay visible.
+    Takes effect for new prune/surgery/compaction writes after a restart."""
+    from fable import paths
+    from fable.setup import run_setup
+    vault = (body.get("vault") or "").strip()
+    if not vault:
+        raise ValueError("vault path required")
+    old_vault = paths.vault_dir()
+    legacy = list(paths.load_config().get("backup_roots", []) or [])
+    if old_vault and os.path.abspath(os.path.expanduser(old_vault)) != \
+            os.path.abspath(os.path.expanduser(vault)):
+        legacy.append(old_vault)
+    return run_setup(vault=vault, legacy_roots=legacy)
+
+
 def api_settings(db_path, params):
     from fable.openrouter import load_env, env_path
     from fable.providers import availability
@@ -899,13 +984,19 @@ def api_settings(db_path, params):
             "('autoprune_enabled','autoprune_pct')").fetchall())
     finally:
         conn.close()
+    from fable import paths
     return {"providers": availability(),
             "openrouter_key": mask("OPENROUTER_API_KEY"),
             "anthropic_key": mask("ANTHROPIC_API_KEY"),
             "openrouter_model": os.environ.get("OPENROUTER_MODEL", ""),
             "env_path": env_path(),
             "autoprune_enabled": cfg.get("autoprune_enabled") == "1",
-            "autoprune_pct": float(cfg.get("autoprune_pct") or 80)}
+            "autoprune_pct": float(cfg.get("autoprune_pct") or 80),
+            "storage": {"home": paths.home(), "db": db_path,
+                        "vault": paths.vault_dir(),
+                        "checkpoints": paths.checkpoints_dir(),
+                        "config": paths.config_path(),
+                        "backup_roots": paths.backup_roots()}}
 
 
 def api_backfill_progress(db_path, params):
@@ -944,9 +1035,12 @@ def api_backfill_progress(db_path, params):
         row = conn.execute("SELECT value FROM meta "
                            "WHERE key='backfill_state'").fetchone()
         conn.close()
-        out["queue"] = (json.loads(row[0]).get("queue") if row else []) or []
+        dbst = json.loads(row[0]) if row else {}
+        out["queue"] = (dbst.get("queue") or [])
+        out["paused"] = bool(dbst.get("paused"))
     except Exception:
         out["queue"] = []
+        out["paused"] = False
     if out.get("error"):
         out["error_raw"] = out["error"]
         out["error"] = _friendly_error(out["error"])
@@ -977,6 +1071,31 @@ def api_cards_health(db_path, params):
         conn.close()
 
 
+def api_logs(db_path, params):
+    """Everything fable tracked: recent ops, card-generation attempts, the
+    errors.log tail, and current backfill state — one place for the user."""
+    conn = fdb.connect(db_path)
+    try:
+        ops = _rows(conn, "SELECT ts, kind, detail FROM ops "
+                          "ORDER BY id DESC LIMIT 60")
+        attempts = _rows(conn, "SELECT ts, provider, model, ok, reason "
+                               "FROM card_attempts ORDER BY ROWID DESC LIMIT 40")
+    finally:
+        conn.close()
+    errors = ""
+    try:
+        elog = os.path.join(os.path.dirname(os.path.abspath(db_path)),
+                            "errors.log")
+        if os.path.exists(elog):
+            with open(elog) as fh:
+                errors = "".join(fh.readlines()[-120:])
+    except OSError:
+        pass
+    return {"ops": ops, "attempts": attempts, "errors": errors,
+            "backfill": api_backfill_progress(db_path, {})}
+
+
+ROUTES["/api/logs"] = api_logs
 ROUTES["/api/cards/health"] = api_cards_health
 ROUTES["/api/backfill"] = api_backfill_progress
 ROUTES["/api/settings"] = api_settings
@@ -1062,19 +1181,372 @@ def post_prune_apply(db_path, body):
     return report
 
 
+def api_curate_timeline(db_path, params):
+    from fable import curate
+    session = (params.get("session") or [None])[0]
+    if not session:
+        raise ValueError("session required")
+    live = _live_path(db_path, session)
+    # an ACTIVE session's live file outgrows the index between hook fires, so
+    # its newest (post-compaction) turns have no prompt_id yet and fall out of
+    # thread grouping. Reindex it — but only when it actually grew.
+    try:
+        conn = fdb.connect(db_path)
+        row = conn.execute("SELECT size FROM files WHERE path = ?",
+                           (live,)).fetchone()
+        conn.close()
+        if not row or row[0] != os.path.getsize(live):
+            from fable.extract import fts_extract_fn
+            from fable.indexer import index_vault
+            index_vault(db_path, [], live_file=live, extract_fn=fts_extract_fn)
+    except Exception:
+        pass
+    return curate.timeline(live, db_path=db_path)
+
+
+def post_curate_plan(db_path, body):
+    from fable import curate
+    return curate.plan(_live_path(db_path, body["session"]),
+                       body.get("focus") or [])
+
+
+def post_curate_apply(db_path, body):
+    import time as _time
+    from fable import curate
+    if not body.get("confirm"):
+        raise ValueError("apply requires confirm: true")
+    live = _live_path(db_path, body["session"])
+    if (_time.time() - os.path.getmtime(live) < 60
+            and not body.get("force")):
+        raise ValueError("session looks ACTIVE (modified <60s ago) — Claude "
+                         "Code is still writing to it; /exit first, or force")
+    # seal lands in the per-user vault (~/.fable/vault/<project>) like every
+    # other backup — same resolver, no hardcoded path
+    return curate.apply(
+        live, body.get("focus") or [], summary_text=body.get("summary") or "",
+        db_path=db_path,
+        backup_dir=_default_backup_dir(db_path, body["session"]))
+
+
+ROUTES["/api/curate/timeline"] = api_curate_timeline
+
+
+def api_prune_analyze(db_path, params):
+    """Per-category prune savings for a session (read-only; nothing removed)."""
+    from fable import slimmers
+    session = (params.get("session") or [None])[0]
+    if not session:
+        raise ValueError("session required")
+    return slimmers.analyze_session(_live_path(db_path, session))
+
+
+ROUTES["/api/prune/analyze"] = api_prune_analyze
+
+
+def post_prune_slim(db_path, body):
+    """Apply per-category slimming to a session's live transcript — seals to the
+    vault first, rewrites with stubbed blocks, reindexes. Refuses an actively-
+    written file (<60s) unless force."""
+    import time as _t
+    from fable import slimmers
+    if not body.get("confirm"):
+        raise ValueError("apply requires confirm: true")
+    session = body.get("session")
+    if not session:
+        raise ValueError("session required")
+    live = _live_path(db_path, session)
+    if (_t.time() - os.path.getmtime(live) < 60) and not body.get("force"):
+        raise ValueError("session looks ACTIVE (modified <60s ago) — "
+                         "/exit it in Claude Code first, or pass force")
+    return slimmers.apply_session(live, body.get("categories") or [],
+                                  _default_backup_dir(db_path, session),
+                                  db_path=db_path)
+
+
 POST_ROUTES = {
+    "/api/curate/plan": post_curate_plan,
+    "/api/curate/apply": post_curate_apply,
     "/api/surgery/plan": post_surgery_plan,
     "/api/surgery/apply": post_surgery_apply,
     "/api/prune/plan": post_prune_plan,
+    "/api/prune/slim": post_prune_slim,
     "/api/prune/apply": post_prune_apply,
     "/api/cards/run": post_cards_run,
     "/api/cards/stop": post_cards_stop,
+    "/api/cards/pause": post_cards_pause,
+    "/api/cards/resume": post_cards_resume,
     "/api/cards/dequeue": post_cards_dequeue,
     "/api/settings": post_settings,
+    "/api/setup": post_setup,
     "/api/facts": post_facts,
     "/api/session/meta": post_session_meta,
     "/api/compose": post_compose,
 }
+
+
+# ── parallel card-backfill pool ───────────────────────────────────────────
+# Up to MAX_PARALLEL jobs run at once (same provider in practice — the sidebar
+# picks one). Each job is independently run / pause / stop / cancel. Pausing a
+# running job frees its slot so the next queued job starts — the parallel cap
+# is hard. Replaces the old single _drain_worker (now dead code above).
+import itertools as _it
+MAX_PARALLEL = 3
+_JOBS = {}
+_JOB_SEQ = _it.count(1)
+_POOL_LOCK = threading.Lock()
+
+
+def _t_now():
+    import time as _t
+    return _t.time()
+
+
+def _job_pub(j):
+    return {k: j.get(k) for k in (
+        "id", "project", "session", "provider", "model", "label",
+        "candidates", "status", "done", "total", "generated", "failed",
+        "error", "started", "finished", "rate_limited")}
+
+
+def _run_job(jid):
+    from fable import cards as _c
+    j = _JOBS.get(jid)
+    if not j:
+        return
+    db = j["_db"]
+    j["started"] = _t_now()
+    # the legacy GLOBAL DB stop flag makes run_cards exit on its first loop
+    # iteration — the pool stops jobs individually via should_stop, so clear it
+    try:
+        _c.clear_stop(db)
+    except Exception:
+        pass
+    try:
+        stats = _c.run_cards(
+            db, project=j["project"], session=j["session"],
+            provider=j["provider"], model=j["model"],
+            abort_after=4, backoff_schedule=(0,),
+            on_state=lambda s: j.update(s),
+            should_stop=lambda: j["_pause"] or j["_stop"] or j["_cancel"])
+        j["generated"] = stats.get("generated", j.get("generated", 0))
+        j["failed"] = stats.get("failed", j.get("failed", 0))
+        errs = stats.get("errors") or []
+        j["_rate"] = any(any(k in str(e).lower() for k in
+                         ("429", "rate", "quota", "limit")) for e in errs)
+        if stats.get("aborted") and errs:
+            last = errs[-1]
+            j["error"] = str(last.get("error") if isinstance(last, dict)
+                             else last)[:160]
+    except Exception as e:
+        msg = str(e)
+        j["_rate"] = any(k in msg.lower()
+                         for k in ("429", "rate", "quota", "limit"))
+        j["error"] = _friendly_error(msg)
+        if not j["_rate"]:
+            j["status"] = "error"
+    finally:
+        j["finished"] = _t_now()
+        gen = j.get("generated") or 0
+        if j.get("_cancel"):
+            _JOBS.pop(jid, None)
+        elif j["_stop"]:
+            j["status"] = "stopped"
+        elif j["_pause"]:
+            j["status"] = "paused"
+        elif j.get("_rate"):
+            j["status"] = "paused"
+            j["rate_limited"] = True
+            j["error"] = ("rate-limited (HTTP 429 / quota) — paused; "
+                          "resume when the quota resets")
+        elif j.get("status") == "error":
+            pass                                    # an exception already set it
+        elif gen == 0 and (j.get("failed") or 0) > 0:
+            j["status"] = "error"                   # ran but carded nothing
+            if not j.get("error"):
+                j["error"] = "all cards failed — check the provider (Logs)"
+        else:
+            j["status"] = "done"
+        _schedule(db)
+
+
+def _schedule(db_path):
+    with _POOL_LOCK:
+        running = sum(1 for x in _JOBS.values() if x["status"] == "running")
+        for j in sorted((x for x in _JOBS.values()
+                         if x["status"] == "queued"), key=lambda x: x["id"]):
+            if running >= MAX_PARALLEL:
+                break
+            j["status"] = "running"
+            running += 1
+            threading.Thread(target=_run_job, args=(j["id"],),
+                             daemon=True).start()
+
+
+def post_cards_run(db_path, body):
+    from fable.cards import run_cards
+    from fable.providers import PROVIDERS
+    project = body.get("project") or None
+    session = body.get("session") or None
+    provider = body.get("provider") or "openrouter"
+    model = body.get("model") or None
+    if provider not in PROVIDERS:
+        raise ValueError(f"provider must be one of {PROVIDERS}")
+    LAST_PROVIDER[0] = provider
+    dry = run_cards(db_path, project=project, session=session, dry_run=True)
+    if not dry["candidates"]:
+        raise ValueError("no uncarded threads in scope — nothing to do")
+    label = (f"session {session[:8]}" if session else (project or "all"))
+    jid = next(_JOB_SEQ)
+    _JOBS[jid] = {"id": jid, "_db": db_path, "project": project,
+                  "session": session, "provider": provider, "model": model,
+                  "label": label, "candidates": dry["candidates"],
+                  "status": "queued", "done": 0, "total": dry["candidates"],
+                  "generated": 0, "failed": 0, "error": None,
+                  "started": None, "finished": None,
+                  "_pause": False, "_stop": False, "_cancel": False}
+    _schedule(db_path)
+    return {"queued": True, "id": jid, "label": label,
+            "candidates": dry["candidates"], "started": _JOBS[jid]["status"]
+            == "running"}
+
+
+# ── live carding: an INDEPENDENT worker that cards new threads as you work.
+#    It does NOT use the bulk pool (_JOBS) and "stop all" never touches it —
+#    it cards directly via run_cards and reports through LIVE_STATE. ──
+LAST_PROVIDER = ["openrouter"]
+LIVE_STATE = {"active": True, "status": "idle", "last_card": None,
+              "last_error": None}
+
+
+def _live_card_loop(db_path):
+    import time as _t
+    from fable.cards import run_cards
+    while True:
+        _t.sleep(15)
+        try:
+            if not LIVE_STATE["active"]:
+                LIVE_STATE["status"] = "off"
+                continue
+            conn = fdb.connect(db_path)
+            row = conn.execute(
+                "SELECT t.session_id FROM threads t "
+                "LEFT JOIN cards c ON c.prompt_id = t.prompt_id "
+                "WHERE c.prompt_id IS NULL AND t.est_tokens >= 200 "
+                "GROUP BY t.session_id "
+                "ORDER BY MAX(t.last_ts) DESC LIMIT 1").fetchone()
+            conn.close()
+            if not row:
+                LIVE_STATE["status"] = "idle"
+                continue
+            LIVE_STATE["status"] = "carding"
+            stats = run_cards(db_path, session=row[0],
+                              provider=LAST_PROVIDER[0],
+                              abort_after=2, backoff_schedule=(0,))
+            errs = stats.get("errors") or []
+            rate = any(any(k in str(e).lower() for k in
+                       ("429", "rate", "quota", "limit")) for e in errs)
+            if stats.get("generated"):
+                LIVE_STATE.update(status="active", last_card=_t.time(),
+                                  last_error=None)
+            elif rate:
+                LIVE_STATE.update(status="rate-limited",
+                                  last_error="rate-limited / quota")
+            else:
+                LIVE_STATE["status"] = "idle"
+        except Exception as e:
+            LIVE_STATE.update(status="error", last_error=str(e)[:120])
+
+
+def post_cards_job(db_path, body):
+    """Per-job control: action = pause | resume | stop | cancel."""
+    jid = int(body.get("id", 0))
+    action = body.get("action")
+    j = _JOBS.get(jid)
+    if not j:
+        return {"ok": False, "reason": "no such job"}
+    if action == "pause":
+        j["_pause"] = True
+        if j["status"] == "queued":
+            j["status"] = "paused"
+    elif action == "resume":
+        if j["status"] in ("paused", "stopped", "error"):
+            j.update(_pause=False, _stop=False, _cancel=False,
+                     status="queued", error=None, started=None,
+                     finished=None)
+            _schedule(db_path)
+    elif action == "stop":
+        j["_stop"] = True
+        if j["status"] != "running":
+            j["status"] = "stopped"
+    elif action == "cancel":
+        j["_cancel"] = True
+        if j["status"] != "running":
+            _JOBS.pop(jid, None)
+    else:
+        raise ValueError("action must be pause|resume|stop|cancel")
+    return {"ok": True}
+
+
+def post_cards_stop(db_path, body):
+    """Global stop — cancel every BULK job + clear the queue. Does NOT touch
+    live carding, which is an independent worker."""
+    for j in list(_JOBS.values()):
+        j["_cancel"] = True
+        if j["status"] != "running":
+            _JOBS.pop(j["id"], None)
+    return {"stopped": True}
+
+
+def post_cards_pause(db_path, body):
+    """Global pause — pause every job (running ones free their slots)."""
+    for j in _JOBS.values():
+        j["_pause"] = True
+        if j["status"] == "queued":
+            j["status"] = "paused"
+    return {"paused": True}
+
+
+def post_cards_resume(db_path, body):
+    for j in _JOBS.values():
+        if j["status"] in ("paused", "stopped", "error"):
+            j.update(_pause=False, _stop=False, _cancel=False,
+                     status="queued", error=None, started=None,
+                     finished=None)
+    _schedule(db_path)
+    return {"resumed": True}
+
+
+def post_cards_dequeue(db_path, body):       # back-compat alias → cancel by id
+    return post_cards_job(db_path, {"id": body.get("id") or body.get("index"),
+                                    "action": "cancel"})
+
+
+def api_backfill_progress(db_path, params):
+    jobs = [_job_pub(j) for j in sorted(_JOBS.values(), key=lambda x: x["id"])]
+    rc = sum(1 for j in jobs if j["status"] == "running")
+    qc = sum(1 for j in jobs if j["status"] in ("queued", "paused"))
+    return {"jobs": jobs, "max_parallel": MAX_PARALLEL,
+            "running": rc > 0, "running_count": rc, "queued_count": qc,
+            "done": sum(j.get("done") or 0 for j in jobs
+                        if j["status"] == "running"),
+            "total": sum(j.get("total") or 0 for j in jobs
+                         if j["status"] == "running"),
+            "generated": sum(j.get("generated") or 0 for j in jobs),
+            "failed": sum(j.get("failed") or 0 for j in jobs),
+            "live": dict(LIVE_STATE),
+            "queue": [j for j in jobs
+                      if j["status"] in ("queued", "paused")]}
+
+
+# repoint the routes to the parallel-pool implementations (the dicts were
+# built earlier with the old single-worker functions)
+POST_ROUTES["/api/cards/run"] = post_cards_run
+POST_ROUTES["/api/cards/stop"] = post_cards_stop
+POST_ROUTES["/api/cards/pause"] = post_cards_pause
+POST_ROUTES["/api/cards/resume"] = post_cards_resume
+POST_ROUTES["/api/cards/dequeue"] = post_cards_dequeue
+POST_ROUTES["/api/cards/job"] = post_cards_job
+ROUTES["/api/backfill"] = api_backfill_progress
 
 
 def _heal_stale(db_path, exc) -> bool:
@@ -1114,6 +1586,11 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 self._send(500, b"dashboard.html missing", "text/plain")
             return
+        if parsed.path == "/mcp":
+            self._send(405, b'{"jsonrpc":"2.0","id":null,"error":'
+                       b'{"code":-32600,"message":"MCP transport is POST-only"}}',
+                       "application/json")
+            return
         fn = ROUTES.get(parsed.path)
         if fn is None:
             self._send(404, b'{"error":"not found"}', "application/json")
@@ -1133,8 +1610,35 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(),
                        "application/json")
 
+    def _handle_mcp(self):
+        """Stateless MCP Streamable-HTTP transport — same tools as `fable mcp`
+        (stdio), but hosted in the dashboard so one launch brings up every
+        service. Delegates each JSON-RPC message to mcp.handle()."""
+        from fable import mcp as _mcp
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            self._send(400, b'{"jsonrpc":"2.0","id":null,"error":'
+                       b'{"code":-32700,"message":"parse error"}}',
+                       "application/json")
+            return
+        msgs = payload if isinstance(payload, list) else [payload]
+        replies = [r for r in (_mcp.handle(self.db_path, m) for m in msgs)
+                   if r is not None]
+        if not replies:                       # all notifications → 202, no body
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        body = json.dumps(replies[0] if len(replies) == 1
+                          else replies).encode()
+        self._send(200, body, "application/json")
+
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/mcp":
+            return self._handle_mcp()
         fn = POST_ROUTES.get(parsed.path)
         if fn is None:
             self._send(404, b'{"error":"not found"}', "application/json")
@@ -1144,6 +1648,11 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             payload = fn(self.db_path, body)
             self._send(200, json.dumps(payload).encode(),
+                       "application/json")
+        except ValueError as e:
+            # expected user-facing validation guard (nothing to do / session
+            # active / bad input) — clean 400, no traceback noise in errors.log
+            self._send(400, json.dumps({"error": str(e)}).encode(),
                        "application/json")
         except Exception as e:
             import traceback
@@ -1176,6 +1685,8 @@ def serve(db_path: str, port: int = 8765, open_browser: bool = True):
     httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
     url = f"http://127.0.0.1:{httpd.server_port}"
     print(f"fable dashboard: {url}  (db: {db_path})  Ctrl-C to stop")
+    threading.Thread(target=_live_card_loop, args=(db_path,),
+                     daemon=True).start()
     if open_browser:
         import webbrowser
         threading.Timer(0.3, webbrowser.open, args=(url,)).start()

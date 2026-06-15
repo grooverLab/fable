@@ -54,9 +54,8 @@ class TestAutoPrune(unittest.TestCase):
         """run_hook with backup roots isolated to the tmp dir — never the
         machine's real vault."""
         from unittest.mock import patch
-        with patch("fable.discover.DEFAULT_BACKUP_ROOTS",
-                   [os.path.join(self.dir, "realroot")]):
-            os.makedirs(os.path.join(self.dir, "realroot"), exist_ok=True)
+        with patch("fable.paths.vault_dir",
+                   return_value=os.path.join(self.dir, "vault")):
             return run_hook(self.db, self.payload)
 
     def _enable(self, pct="50"):
@@ -86,7 +85,7 @@ class TestAutoPrune(unittest.TestCase):
         # vault backup sealed somewhere under the fallback root
         import glob
         self.assertTrue(glob.glob(os.path.join(
-            self.dir, "realroot", "**", "v0-raw.jsonl"), recursive=True))
+            self.dir, "vault", "**", "v0-raw.jsonl"), recursive=True))
         # immediate second call: cooldown suppresses
         out2 = self._run()
         self.assertNotIn("system_message", out2)

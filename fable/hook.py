@@ -36,8 +36,8 @@ MUTATING_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "Read")
 
 
 def _ckpt_dir(session_id):
-    base = (os.environ.get("FABLE_CHECKPOINTS")
-            or os.path.expanduser("~/.fable/checkpoints"))
+    from fable.paths import checkpoints_dir
+    base = checkpoints_dir()
     d = os.path.join(base, session_id or "unknown")
     os.makedirs(d, exist_ok=True)
     return d
@@ -180,12 +180,12 @@ def _auto_prune(db_path: str, payload: dict):
     if pct < threshold:
         return None
 
-    from fable.discover import DEFAULT_BACKUP_ROOTS, project_label
+    from fable.discover import project_label
+    from fable.paths import vault_dir
     from fable.prune import prune_file
     before = os.path.getsize(transcript)
     project = project_label(os.path.basename(os.path.dirname(transcript)))
-    backup_root = next((r for r in DEFAULT_BACKUP_ROOTS if os.path.isdir(r)),
-                       str(Path(db_path).parent / "backups"))
+    backup_root = vault_dir()
     try:
         prune_file(transcript, "resume",
                    backup_dir=Path(backup_root) / project,
@@ -208,6 +208,20 @@ def _auto_prune(db_path: str, payload: dict):
             f"`claude --resume {session}`")
 
 
+def _tail_index(db_path, transcript):
+    """Roadmap #1: keep the Map fresh with the turns just appended to the live
+    transcript — cheap tail index, no seal. Best-effort: an indexing hiccup
+    must never affect the running session."""
+    if not transcript or not os.path.exists(transcript):
+        return
+    try:
+        from fable.extract import fts_extract_fn
+        from fable.indexer import index_live_tail
+        index_live_tail(db_path, transcript, extract_fn=fts_extract_fn)
+    except Exception as e:
+        _log(db_path, f"tail-index failed: {e}")
+
+
 def run_hook(db_path: str, payload: dict) -> dict:
     transcript = payload.get("transcript_path")
     event = payload.get("hook_event_name", "?")
@@ -219,11 +233,19 @@ def run_hook(db_path: str, payload: dict) -> dict:
         if msg:
             result["system_message"] = msg
         return result
+    if event in ("Stop", "SubagentStop"):
+        # turn boundary: the assistant (or a subagent) just finished, so the
+        # new turn(s) are settled in the transcript — index the tail now
+        _tail_index(db_path, transcript)
+        return {"ok": True, "event": event}
     if event == "UserPromptSubmit":
         # the user may have edited tracked files in their IDE while Claude
-        # was idle — sweep for silent changes before the next turn begins
+        # was idle — sweep for silent changes before the next turn begins —
+        # and tail-index so the just-submitted prompt enters the Map at once
         payload = dict(payload, tool_name="Bash")
-        return _post_tool(payload)
+        result = _post_tool(payload)
+        _tail_index(db_path, transcript)
+        return result
 
     if event == "SessionStart":
         # auto-inject remembered facts into the fresh session — and after a
@@ -239,24 +261,38 @@ def run_hook(db_path: str, payload: dict) -> dict:
         except FileNotFoundError:
             pass
         if payload.get("source") == "compact" and session != "?":
+            # a tool description is passive; THIS fires the instruction at the
+            # exact moment the model would otherwise trust the lossy summary
+            parts.append(
+                "⚠ This session was COMPACTED — the earlier turns you see are "
+                "a lossy summary. Before relying on the summary for any "
+                "specific detail (decisions, code, exact wording), recall the "
+                "real turns with the fable MCP tools (fable_search → "
+                "fable_thread); fable preserved the full verbatim transcript.")
             healed = _compaction_recovery(db_path, session)
             if healed:
                 parts.append(healed)
+        else:
+            parts.append(
+                "📚 fable recall is available (MCP tools fable_search, "
+                "fable_thread, fable_block). When you need earlier "
+                "conversation, a past decision, or a prior code discussion "
+                "that isn't in your context, call fable_search instead of "
+                "guessing — it indexes this and every past session, verbatim.")
         return {"ok": True, "event": event, "inject": "\n".join(parts)}
 
     if not transcript or not os.path.exists(transcript):
         return {"ok": False, "reason": "no transcript_path"}
 
-    from fable.discover import DEFAULT_BACKUP_ROOTS, project_label
+    from fable.discover import project_label
+    from fable.paths import vault_dir
     from fable.extract import fts_extract_fn
     from fable.indexer import index_vault
     from fable.prune import backup as vault_backup
 
     # project label from the encoded ~/.claude/projects dirname
     project = project_label(os.path.basename(os.path.dirname(transcript)))
-    backup_root = next((r for r in DEFAULT_BACKUP_ROOTS if os.path.isdir(r)),
-                       str(Path(db_path).parent / "backups"))
-    backup_dir = Path(backup_root) / project
+    backup_dir = Path(vault_dir()) / project
 
     version, dest = vault_backup(Path(transcript), backup_dir)
     stats = index_vault(db_path, [str(dest)], live_file=transcript,

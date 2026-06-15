@@ -15,7 +15,8 @@ from fable import db as fdb
 
 
 def _default_db():
-    return os.environ.get("FABLE_DB", "fable.db")
+    from fable.paths import default_db
+    return default_db()
 
 
 def _vault_paths(values):
@@ -246,6 +247,17 @@ def build_parser():
     sp.add_argument("--live", help="live (mutable) transcript")
     sp.set_defaults(fn=cmd_index)
 
+    sp = sub.add_parser("setup",
+                        help="configure the ~/.fable home (vault, migration)")
+    sp.add_argument("--vault", help="vault directory (default ~/.fable/vault)")
+    sp.add_argument("--legacy-roots", nargs="*",
+                    help="extra dirs to read pre-existing backups from")
+    sp.add_argument("--migrate-db",
+                    help="move an existing index db into ~/.fable/fable.db")
+    sp.add_argument("--move-env", help="copy an existing .env into ~/.fable/.env")
+    sp.set_defaults(fn=lambda a: __import__(
+        "fable.setup", fromlist=["cmd_setup"]).cmd_setup(a))
+
     sp = sub.add_parser("discover",
                         help="find and index all Claude Code projects")
     sp.add_argument("--projects-dir", default=None)
@@ -353,8 +365,12 @@ def build_parser():
     sp.set_defaults(fn=lambda a: __import__(
         "fable.facts", fromlist=["cmd_forget"]).cmd_forget(a))
 
-    sp = sub.add_parser("embed", help="embed cards for semantic search "
+    sp = sub.add_parser("embed", help="embed threads for semantic search "
                                       "(ollama or OPENAI_API_KEY)")
+    sp.add_argument("--source", choices=["card", "thread", "both"],
+                    default="both",
+                    help="card summary, the thread's own text, or both "
+                         "(default: both — covers carded and uncarded)")
     sp.set_defaults(fn=lambda a: __import__(
         "fable.embeddings", fromlist=["cmd_embed"]).cmd_embed(a))
 

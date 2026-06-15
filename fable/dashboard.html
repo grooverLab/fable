@@ -28,21 +28,46 @@ body{
 ::-webkit-scrollbar-track{background:transparent}
 
 /* ── frame ─────────────────────────────────── */
-.app{display:grid;grid-template-columns:300px 1fr;grid-template-rows:auto 1fr;height:100vh}
-header{
-  grid-column:1/-1;display:flex;align-items:baseline;gap:28px;
-  padding:14px 24px 12px;border-bottom:1px solid var(--line);
-  background:linear-gradient(180deg,var(--ink2),var(--ink));
-}
-.wordmark{font:900 30px/1 var(--serif);color:var(--phos);letter-spacing:-.5px}
+.app{display:grid;grid-template-columns:58px var(--tree-w,290px) 1fr;grid-template-rows:auto 1fr;height:100vh;position:relative}
+#tree-resize{position:absolute;top:42px;bottom:26px;width:9px;left:calc(58px + var(--tree-w,290px) - 4px);cursor:col-resize;z-index:35}
+#tree-resize::after{content:"";position:absolute;left:4px;top:0;bottom:0;width:1px;background:transparent;transition:background .15s,box-shadow .15s}
+#tree-resize:hover::after,#tree-resize.drag::after{background:var(--phos);box-shadow:0 0 7px var(--phos)}
+.tree-toggle{cursor:pointer;color:var(--dim);font-size:13px;padding:3px 7px;border-radius:5px;user-select:none;flex:none;transition:color .15s,background .15s}
+.tree-toggle:hover{color:var(--phos);background:var(--ink3)}
+/* ── lens rail (far left, persistent) ── */
+.rail{grid-column:1;grid-row:1/-1;display:flex;flex-direction:column;align-items:center;gap:2px;
+  background:var(--ink2);border-right:1px solid var(--line);padding:9px 0 34px;overflow-y:auto;overflow-x:hidden}
+.rail .rlogo{font:900 24px/1 var(--serif);color:var(--phos);margin-bottom:10px;cursor:default;user-select:none}
+.rail .tab{width:48px;height:46px;padding:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:3px;border-radius:8px;cursor:pointer;color:var(--dim);border:0;background:transparent;font-family:var(--mono);position:relative}
+.rail .tab i{font-style:normal;font-size:16px;line-height:1}
+.rail .tab span{font-size:7.5px;letter-spacing:.05em}
+.rail .tab:hover{color:var(--text);background:var(--ink3)}
+.rail .tab.active{color:var(--phos);background:var(--ink3)}
+.rail .tab.active::before{content:"";position:absolute;left:-9px;top:9px;bottom:9px;width:2px;border-radius:2px;background:var(--phos)}
+.rail .rspace{flex:1;min-height:8px}
+.rail .tabbadge{position:absolute;top:4px;right:6px}
+.rail .errdot{position:absolute;top:4px;right:7px;width:7px;height:7px;border-radius:50%;background:var(--red);box-shadow:0 0 5px var(--red)}
+/* ── top bar: breadcrumb + global palette trigger ── */
+header{grid-column:2/-1;grid-row:1;display:flex;align-items:center;gap:18px;
+  padding:9px 22px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,var(--ink2),var(--ink))}
+.wordmark{font:900 20px/1 var(--serif);color:var(--phos);letter-spacing:-.4px;cursor:pointer;white-space:nowrap;flex:none}
 .wordmark .tail{color:var(--faint);font-weight:300;font-style:italic}
-.tagline{color:var(--dim);font-size:11px;letter-spacing:.14em;text-transform:uppercase}
-#statsbar{margin-left:auto;display:flex;gap:22px;font-size:11.5px}
-#statsbar b{color:var(--phos);font-weight:600}
-#statsbar span{color:var(--dim)}
+.wordmark:hover{filter:brightness(1.12)}
+.crumb{font-size:12px;color:var(--dim);display:flex;gap:7px;align-items:center;white-space:nowrap;overflow:hidden;min-width:0}
+.crumb a{color:var(--dim);cursor:pointer;text-decoration:none}
+.crumb a:hover{color:var(--phos)}
+.crumb .sep{color:var(--faint)}
+.crumb b{color:var(--text);font-weight:600;overflow:hidden;text-overflow:ellipsis}
+#palette-open{margin-left:auto;min-width:240px;max-width:440px;flex:0 1 440px;background:var(--ink3);
+  border:1px solid var(--line);color:var(--dim);font:inherit;font-size:12px;padding:7px 12px;
+  border-radius:6px;cursor:text;text-align:left;letter-spacing:0}
+#palette-open:hover{background:var(--ink3);border-color:var(--phos-dim);color:var(--text)}
+#palette-open kbd{float:right;color:var(--faint);font-size:10px;border:1px solid var(--line);border-radius:3px;padding:0 4px}
 
 /* ── sidebar ───────────────────────────────── */
 aside{
+  grid-column:2;grid-row:2;
   border-right:1px solid var(--line);overflow-y:auto;overflow-x:hidden;
   background:var(--ink2);padding:16px 0 40px;
 }
@@ -68,13 +93,16 @@ aside select{min-width:0;width:100%;text-overflow:ellipsis}
 .sess a:hover{color:var(--text);background:var(--ink3)}
 .sess a.active{color:var(--phos);border-left-color:var(--phos);background:var(--ink3)}
 .sess .meta{color:var(--faint);font-size:10.5px}
+.mbadge{display:inline-block;font-size:8px;border:1px solid;border-radius:3px;padding:0 3px;margin-right:5px;letter-spacing:.03em;text-transform:uppercase;vertical-align:1px;opacity:.4;transition:opacity .15s}
+.sess a.active .mbadge,.sess a:hover .mbadge{opacity:1}
+.livedot{color:var(--green);animation:flGlow 2s ease-in-out infinite;font-size:9px}
 .sess-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sess-actions{display:flex;gap:8px;margin-top:3px;opacity:.55;
   transition:opacity .15s}
 .sess a:hover .sess-actions{opacity:1}
 
 /* ── main ──────────────────────────────────── */
-main{overflow-y:auto;padding:22px 28px 80px}
+main{grid-column:3;grid-row:2;overflow-y:auto;padding:22px 28px 80px}
 .searchrow{display:flex;gap:10px;margin-bottom:6px;flex-wrap:wrap}
 .searchrow input[type=text]{
   background:var(--ink3);border:1px solid var(--line);color:var(--text);
@@ -336,10 +364,26 @@ button.danger:hover{background:#ff8557}
   <div class="m-body" id="m-body"></div>
 </div>
 <div class="app">
+  <nav class="rail">
+    <div class="rlogo" title="fable — transcript memory">f</div>
+    <button class="tab active" data-tab="search" title="Search the vault"><i>⌕</i><span>SEARCH</span></button>
+    <button class="tab" data-tab="editor" title="Context Editor"><i>◐</i><span>EDIT</span></button>
+    <button class="tab" data-tab="files" title="Files — time-travel diffs"><i>▤</i><span>FILES</span></button>
+    <button class="tab" data-tab="cards" title="Cards — AI summaries"><i>▦</i><span>CARDS</span></button>
+    <button class="tab" data-tab="prune" title="Prune — slim a session"><i>⚗</i><span>PRUNE</span></button>
+    <button class="tab" data-tab="compose" title="Compose / Loom"><i>⊞</i><span>LOOM</span><span class="tabbadge" id="bk-count" style="display:none"></span></button>
+    <button class="tab" data-tab="graph" title="Graph"><i>◌</i><span>GRAPH</span></button>
+    <button class="tab" data-tab="costs" title="Dashboard — telemetry"><i>◔</i><span>STATS</span></button>
+    <div class="rspace"></div>
+    <button class="tab" data-tab="logs" title="Logs — every operation, card run & error"><i>≋</i><span>LOGS</span><span class="errdot" id="log-errdot" style="display:none"></span></button>
+    <button class="tab" data-tab="stats" title="Index"><i>≡</i><span>INDEX</span></button>
+    <button class="tab" data-tab="settings" title="Settings"><i>⚙</i><span>SET</span></button>
+  </nav>
   <header>
-    <div class="wordmark">fable<span class="tail">·Recall</span></div>
-    <div class="tagline">transcript memory engine</div>
-    <div id="statsbar"></div>
+    <span class="tree-toggle" onclick="toggleTree()" title="show / hide the session tree (⌘\)">☰</span>
+    <div class="wordmark" onclick="currentThread=null;showTab('search')" title="fable — home">fable<span class="tail">·Recall</span></div>
+    <div id="crumb" class="crumb"></div>
+    <button id="palette-open" onclick="openPalette()">Search the vault, jump anywhere…<kbd>⌘K</kbd></button>
   </header>
 
   <aside>
@@ -360,19 +404,8 @@ button.danger:hover{background:#ff8557}
     <div id="tree"><div class="loading">scanning vault…</div></div>
   </aside>
 
+  <div id="tree-resize"></div>
   <main>
-    <div class="tabs">
-      <div class="tab active" data-tab="search">Search</div>
-      <div class="tab" data-tab="compose">⊞ Compose<span class="tabbadge" id="bk-count" style="display:none"></span></div>
-      <div class="tab" data-tab="graph">Graph</div>
-      <div class="tab" data-tab="surgery">Surgery</div>
-      <div class="tab" data-tab="files">Files</div>
-      <div class="tab" data-tab="cards">Cards</div>
-      <div class="tab" data-tab="costs">Dashboard</div>
-      <div class="tab" data-tab="settings">Settings</div>
-      <div class="tab" data-tab="stats">Index</div>
-    </div>
-
     <section id="view-search">
       <div class="searchrow">
         <input id="q" type="text" placeholder="search the archive… (zigzag pivot, PID v3, option chain)" autofocus>
@@ -433,36 +466,198 @@ button.danger:hover{background:#ff8557}
       <svg id="graphsvg"></svg>
     </section>
 
-    <section id="view-surgery" style="display:none">
+    <section id="view-prune" style="display:none">
       <div class="searchrow">
-        <select id="s-session"></select>
-        <button id="s-load" class="ghost">analyze session</button>
-        <button id="s-preview" style="display:none">PREVIEW PLAN</button>
-        <button id="s-apply" class="danger" style="display:none">APPLY SURGERY</button>
+        <select id="pr-session"></select>
+        <button class="ghost" onclick="previewPrune();loadPruneCategories()">scan session</button>
       </div>
       <div class="steps">
-        <span><b>1</b> pick a session &amp; ANALYZE — every thread is listed, risky ones pre-ticked with a reason</span>
-        <span><b>2</b> tick / untick the threads to remove</span>
-        <span><b>3</b> PREVIEW — a pure simulation: records removed, tokens saved, chain validity (nothing is written)</span>
-        <span><b>4</b> APPLY — vault backup first, then atomic rewrite</span>
-        <i class="info" data-tip="WHAT SURGERY IS: your live transcript is Claude Code's working memory — every byte in it costs context. Surgery removes WHOLE THREADS (a prompt + everything it caused) that no longer earn their tokens: tool-noise dumps, subagent exploration, work superseded by a later attempt. WHY IT'S SAFE: it refuses sessions active in the last 60s; a vault backup generation is sealed and indexed BEFORE anything is touched; an evict gate proves every dropped record has an immutable copy; the rewrite is atomic (temp+fsync+rename) and parentUuid chains are re-stitched so Claude Code can still resume the session. Dropped threads remain searchable and recallable here forever — surgery moves memory from working set to archive, it never deletes it."></i>
+        <span><b>1</b> pick a session — its live file is scanned for recoverable weight</span>
+        <span><b>2</b> optionally also strip image payloads</span>
+        <span><b>3</b> APPLY — vault version sealed first, then every message is slimmed in place (tool dumps → [pruned], noise dropped)</span>
+        <i class="info" data-tip="PRUNE keeps EVERY thread and turn but slims each message: tool outputs become '[pruned]', noise records drop, optionally images strip. The conversation skeleton stays complete — this is routine weight loss so a session keeps fitting. To REMOVE whole dead conversations use Context Editor → Surgery; to FOCUS specific turns use Context Editor → Aperture. All three: vault version sealed first, everything stays recallable in fable."></i>
       </div>
       <div class="genwrap prune-hero" style="margin-bottom:12px">
         <span class="ph-title">⚗ Message slimming (prune)</span>
-        <i class="info" data-tip="The other scalpel: prune keeps EVERY thread and turn but slims each message — tool outputs become '[pruned]', noise records drop, optionally images strip. The conversation skeleton stays complete. Use prune for routine weight loss; use thread surgery below to remove whole dead conversations. Both: vault backup first, everything stays recallable in fable."></i>
-        <span class="ph-sub" style="margin-left:8px">your live transcript is paying rent for every byte — this is the cheapest eviction</span>
-        <div id="p-report" style="margin-top:10px;font-size:12px"><span class="loading" style="padding:0">scanning live file…</span></div>
+        <span class="ph-sub" style="margin-left:8px">your live transcript pays rent for every byte — this is the cheapest eviction</span>
+        <div id="p-report" style="margin-top:10px;font-size:12px"><span class="hint">pick a session and scan</span></div>
         <div id="p-cooldown" style="display:none;margin-top:8px;font-size:11.5px;color:var(--dim);border:1px dashed var(--line);border-radius:6px;padding:7px 10px"></div>
         <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
-          <span class="bf-btn" onclick="previewPrune()" title="re-scan the live file">↻ rescan</span>
+          <span class="bf-btn" onclick="previewPrune();loadPruneCategories()" title="re-scan the live file">↻ rescan</span>
           <label style="font-size:11px;color:var(--dim)"><input type="checkbox" id="p-img" style="accent-color:var(--phos)" onchange="renderPruneHero()"> also strip images</label>
           <span class="bf-btn" id="p-apply" style="display:none;color:var(--ember);border-color:var(--ember)" onclick="applyPrune()" title="backup → gate → atomic rewrite of the live transcript">⚗ APPLY PRUNE</span>
         </div>
       </div>
-      <div id="s-report"></div>
-      <div id="s-list"><div class="empty">pick a session with a live transcript and hit analyze</div></div>
+      <div class="genwrap" id="pr-cats-wrap" style="display:none;margin-bottom:12px">
+        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+          <b style="color:var(--phos)">✦ what to slim</b>
+          <span class="hint">surgical, per-category — tick to count toward the total</span>
+          <span style="margin-left:auto;font-size:12px">selected: <b id="pr-cat-tot">~0 tok</b></span>
+        </div>
+        <div id="pr-cats" style="margin-top:8px"></div>
+        <div style="display:flex;gap:12px;align-items:center;margin-top:8px;flex-wrap:wrap">
+          <span class="bf-btn" style="color:var(--ember);border-color:var(--ember)" onclick="applyPruneCategories()" title="seal a vault version, then stub only the ticked categories in the live transcript (records + chain kept)">⚗ apply selected</span>
+          <span id="pr-cat-report" class="hint"></span>
+        </div>
+      </div>
     </section>
 
+    <section id="view-editor" style="display:none">
+      <style>
+        .ap-tl{position:relative;max-width:1060px;margin:0 auto;padding:8px 0}
+        .ap-tl::before{content:"";position:absolute;left:50%;top:0;bottom:0;width:2px;background:var(--line);transform:translateX(-50%)}
+        .ap-node{position:relative;margin:20px 0}
+        .ap-node::after{content:"";position:absolute;left:50%;top:0;width:10px;height:10px;border-radius:50%;background:var(--ink);border:2px solid var(--line);transform:translate(-50%,-1px);z-index:2}
+        .ap-node.ap-on::after{border-color:var(--phos);background:var(--phos)}
+        .ap-time{position:absolute;left:50%;top:-4px;transform:translateX(-50%);font-size:10px;color:var(--dim);background:var(--ink);padding:1px 9px;border-radius:10px;border:1px solid var(--line);white-space:nowrap;z-index:3}
+        .ap-card{width:43%;box-sizing:border-box;background:var(--ink2);border:1px solid var(--line);border-radius:9px;padding:8px 11px;margin-top:16px}
+        .ap-node.left .ap-card{margin-right:auto}
+        .ap-node.right .ap-card{margin-left:auto}
+        .ap-card.ap-on{border-color:var(--phos);background:var(--ink3)}
+        .ap-chead{display:flex;gap:8px;align-items:center;font-size:12px}
+        .ap-card input{accent-color:var(--phos);flex:none}
+        .ap-exp{font-size:10.5px;color:var(--dim);cursor:pointer;border:1px solid var(--line);border-radius:4px;padding:1px 7px;white-space:nowrap;margin-left:auto}
+        .ap-exp:hover{color:var(--phos);border-color:var(--phos)}
+        .ap-prev{font-size:11.5px;color:var(--dim);white-space:pre-wrap;word-break:break-word;overflow:hidden;max-height:3.4em;line-height:1.4;margin-top:5px}
+        .ap-card.ap-exp-open .ap-prev{max-height:none}
+        .ap-sep{text-align:center;color:var(--dim);font-size:11px;letter-spacing:.06em;border:1px dashed var(--line);border-radius:6px;padding:6px;margin:16px auto;background:var(--ink);max-width:62%;position:relative;z-index:2}
+        .ap-find{font-size:12px;color:var(--text);padding:7px 11px;margin-bottom:10px;border:1px solid var(--line);border-radius:6px;background:var(--ink2)}
+        .ap-sum{position:relative;z-index:2;max-width:980px;margin:16px auto;border:1px solid var(--phos);border-radius:8px;background:var(--ink)}
+        .ap-sum>summary{cursor:pointer;list-style:none;padding:7px 12px;color:var(--phos);font-size:11.5px;text-align:center}
+        .ap-sum>summary::-webkit-details-marker{display:none}
+        .ap-sum-body{padding:11px 15px;border-top:1px solid var(--line);font-size:12px;color:var(--text);white-space:pre-wrap;word-break:break-word;max-height:440px;overflow:auto;line-height:1.55}
+        /* sticky heroes over a scrolling timeline — tint on an OPAQUE base + shadow so the spine can't bleed through */
+        #ap-bar{background:linear-gradient(135deg,rgba(108,199,217,.07),transparent 55%),var(--ink) !important;box-shadow:0 10px 22px -8px rgba(0,0,0,.8),0 0 28px rgba(108,199,217,.10)}
+        #surg-bar{background:linear-gradient(135deg,rgba(214,110,90,.09),transparent 55%),var(--ink) !important;border-color:rgba(214,110,90,.5) !important;box-shadow:0 10px 22px -8px rgba(0,0,0,.8),0 0 28px rgba(214,110,90,.10)}
+        /* mode toggle */
+        .ed-head{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+        .ed-title{font:700 17px var(--serif);color:var(--text)}
+        .ed-sub{font:400 11px var(--mono);color:var(--faint);margin-left:8px}
+        .ed-modes{display:flex;gap:8px;align-items:center;margin-bottom:0}
+        .ed-mode{cursor:pointer;font-size:12.5px;padding:6px 14px;border:1px solid var(--line);border-radius:18px;color:var(--dim);user-select:none;transition:background .15s,color .15s}
+        .ed-mode.active[data-mode=read]{color:var(--ink);background:var(--text);border-color:var(--text);font-weight:600}
+        .ed-mode.active[data-mode=aperture]{color:var(--ink);background:var(--phos);border-color:var(--phos);font-weight:600}
+        .ed-mode.active[data-mode=surgery]{color:#fff;background:var(--ember);border-color:var(--ember);font-weight:600}
+        .ed-stat{margin-left:auto;font-size:11.5px;color:var(--dim);white-space:nowrap}
+        .ed-action{font-weight:700;padding:7px 16px;font-size:12.5px;flex:none;cursor:pointer}
+        .ed-action.aperture{color:var(--ink);background:var(--phos);border-color:var(--phos)}
+        .ed-action.surgery{color:#fff;background:var(--ember);border-color:var(--ember)}
+        /* thread groups (the shared canvas) */
+        .ed-group{max-width:1060px;margin:0 auto 4px}
+        .ed-thread{display:flex;gap:9px;align-items:flex-start;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--ink2)}
+        .ed-thread.ed-drop{border-color:var(--ember);background:var(--ink3)}
+        .ed-thread.ed-drop b{text-decoration:line-through;color:var(--dim)}
+        .ed-tw{cursor:pointer;color:var(--ember);font-size:15px;font-weight:700;line-height:1;user-select:none;margin-top:1px}
+        .ed-thread input{accent-color:var(--ember);flex:none;margin-top:3px}
+        .ed-thread .why{font-size:11px;color:var(--ember);margin-top:3px}
+        .ed-foc-n{font-size:11px;color:var(--phos);white-space:nowrap}
+        /* continuous-spine redesign: card title as a divider ON the spine, turns visible by default, optional fold */
+        .ed-divider{position:relative;z-index:2;display:flex;gap:9px;align-items:center;width:fit-content;max-width:760px;margin:22px auto 4px;padding:7px 16px;border:1px solid var(--line);border-radius:18px;background:var(--ink2);box-shadow:0 0 0 5px var(--ink)}
+        .ed-divider.ed-drop{border-color:var(--ember);background:var(--ink3)}
+        .ed-divider.ed-drop b{text-decoration:line-through;color:var(--dim)}
+        .ed-divider input{accent-color:var(--ember);flex:none}
+        .ed-divider .why{font-size:11px;color:var(--ember);margin-top:3px}
+        .grade-sm{display:inline-block;font:700 10px var(--serif);border:1px solid;border-radius:4px;padding:0 4px;vertical-align:1px}
+        .ed-sumcard{max-width:980px;margin:14px auto 12px;border:1px solid rgba(108,199,217,.5);border-left:3px solid var(--cyan);border-radius:9px;background:linear-gradient(rgba(108,199,217,.06),rgba(108,199,217,.06)),var(--ink2);padding:12px 16px;position:relative;z-index:2}
+        .ed-sumtext{font-size:12.5px;color:var(--text);line-height:1.55}
+        .ed-sumchips{display:flex;gap:7px;margin-top:8px;flex-wrap:wrap}
+        .ed-chip{font-size:9.5px;border:1px solid var(--line);border-radius:10px;padding:1px 8px;color:var(--cyan)}
+        .ed-comfortable .ap-card{padding:12px 15px}
+        .ed-comfortable .ap-node{margin:30px 0}
+        .ed-comfortable .ed-divider,.ed-comfortable .ed-sumcard{margin-top:26px}
+        #ed-minimap{position:fixed;right:6px;top:120px;bottom:34px;width:8px;display:flex;flex-direction:column;gap:0;z-index:6;opacity:.55;transition:opacity .2s}
+        #ed-minimap:hover{opacity:1}
+        .mm-seg{width:100%;cursor:pointer;flex:1 1 0;min-height:1px}
+        .mm-seg:hover{outline:1px solid var(--phos);outline-offset:-1px}
+        .mm-wall{width:100%;height:4px;background:var(--ember);box-shadow:0 0 5px var(--ember);border-radius:1px;flex:none;margin:1px 0}
+        .ed-group.ed-collapsed .ed-body{display:none}
+        .ap-wall{border-color:var(--ember) !important;color:var(--ember) !important}
+        .ed-stickyhead{position:sticky;top:0;z-index:7;background:var(--ink);padding:8px 0 6px;border-bottom:1px solid var(--line);margin-bottom:8px}
+      </style>
+      <div class="ed-stickyhead">
+      <div class="ed-head">
+        <div class="ed-title">Context Editor<span class="ed-sub" id="ed-sub"></span></div>
+        <div class="ed-modes">
+          <span class="ed-mode active" data-mode="read" onclick="edSetMode('read')">● Read</span>
+          <span class="ed-mode" data-mode="aperture" onclick="edSetMode('aperture')">◎ Aperture · keep</span>
+          <span class="ed-mode" data-mode="surgery" onclick="edSetMode('surgery')">⚕ Surgery · cut</span>
+          <i class="info" data-tip="CONTEXT EDITOR — READ to browse the spine; APERTURE ticks TURNS to KEEP → author a manual compaction wall (append-only, nothing deleted, same session); SURGERY ticks dead THREADS to REMOVE → atomic rewrite, chain re-stitched. Both seal a sacred vault version first; everything stays recallable. (Routine message-slimming is the separate Prune tab.)"></i>
+        </div>
+        <div class="ed-stat" id="ed-stat"></div>
+        <span class="ed-action bf-btn read" id="ed-action" onclick="edAction()">▶ Resume session</span>
+        <span id="ap-meter" style="display:none"></span>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <span class="bf-btn" onclick="edFoldAll()" title="collapse every thread to its title">⊟ Fold all</span>
+        <span class="bf-btn" onclick="edUnfoldAll()" title="expand every thread">⊞ Unfold all</span>
+        <span class="bf-btn" id="ed-dense" onclick="edDensity()" title="toggle row spacing">⊡ Comfortable</span>
+      </div>
+      <div class="searchrow">
+        <select id="ap-session"></select>
+        <button id="ap-load" class="ghost">load</button>
+        <input id="ap-q" placeholder="find in this transcript…" style="flex:1;min-width:180px;background:var(--ink3);border:1px solid var(--line);color:var(--text);padding:7px 10px;border-radius:4px" onkeydown="if(event.key==='Enter')apSearch()" oninput="if(!this.value)apSearch()">
+        <button class="ghost" onclick="apSearch()">find</button>
+      </div>
+      <div class="steps" id="ed-steps"></div>
+      <div id="ap-bar" class="genwrap prune-hero" style="display:none;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span class="ph-title">◎ Curated context</span>
+          <span class="ph-sub" style="flex:1;min-width:140px">you become the compactor — author a manual wall, same session, nothing deleted</span>
+          <span class="bf-btn" onclick="apClear()" title="clear the focus set">↺ clear focus</span>
+          <span class="bf-btn" id="ap-apply" style="color:var(--ember);border-color:var(--ember);font-weight:700;padding:7px 16px;font-size:12.5px" onclick="applyCurate()">◎ APPLY &amp; RESUME</span>
+        </div>
+        <div style="display:flex;gap:14px;align-items:baseline;margin-top:8px;flex-wrap:wrap">
+          <span class="ph-big" id="ap-foc-tok">0 tok</span>
+          <span style="color:var(--text)">in focus · <b id="ap-foc-n">0</b> turns kept raw</span>
+          <span class="ph-sub" id="ap-mask"></span>
+        </div>
+        <div class="meter" style="max-width:540px"><i id="ap-meter-bar" style="width:0%"></i></div>
+        <textarea id="ap-summary" placeholder="optional — summary of the turns you did NOT keep in focus (so the model isn't blind to them). Leave blank for a hard cut." style="width:100%;margin-top:8px;min-height:44px;background:var(--ink3);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:8px 10px;font:inherit;font-size:12px"></textarea>
+        <div id="ap-report" style="margin-top:6px;font-size:12px"></div>
+      </div>
+      <div id="surg-bar" class="genwrap prune-hero" style="display:none;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span class="ph-title" style="color:var(--ember)">⚕ Surgery</span>
+          <span class="ph-sub" style="flex:1;min-width:140px">remove whole dead threads — atomic rewrite, chain re-stitched, vault sealed first; everything stays recallable</span>
+          <span class="bf-btn" onclick="surgClear()" title="untick every thread">↺ clear</span>
+          <span class="bf-btn" id="surg-preview" onclick="previewSurgery()">PREVIEW PLAN</span>
+          <span class="bf-btn" id="surg-apply" style="display:none;color:var(--ember);border-color:var(--ember);font-weight:700;padding:7px 16px;font-size:12.5px" onclick="applySurgery()">⚕ APPLY SURGERY</span>
+        </div>
+        <div style="display:flex;gap:14px;align-items:baseline;margin-top:8px;flex-wrap:wrap">
+          <span class="ph-big" id="surg-tok" style="color:var(--ember)">0 tok</span>
+          <span style="color:var(--text)"><b id="surg-n">0</b> threads marked for removal</span>
+        </div>
+        <div id="surg-report" style="margin-top:6px;font-size:12px"></div>
+      </div>
+      </div>
+      <div id="ap-list"><div class="empty">pick a session with a live transcript and load its timeline</div></div>
+      <div id="ed-minimap"></div>
+    </section>
+
+    <style>
+    .ft-railwrap{margin-top:12px;padding:16px 10px 6px;border-top:1px solid var(--line);position:relative}
+    .ft-raillabel{position:absolute;top:4px;left:8px;font-size:9px;letter-spacing:.12em;color:var(--faint)}
+    #ft-rail{position:relative}
+    .ft-track{position:relative;height:34px;cursor:pointer}
+    .ft-track::before{content:"";position:absolute;left:0;right:0;top:17px;height:2px;background:var(--line);border-radius:2px}
+    .ft-fill{position:absolute;top:16px;height:4px;background:var(--phos);opacity:.4;border-radius:2px}
+    .ft-tick{position:absolute;top:14px;width:3px;height:8px;border-radius:1px;transform:translateX(-50%);opacity:.65}
+    .ft-handle{position:absolute;top:11px;width:14px;height:14px;border-radius:50%;background:var(--ink);border:2px solid var(--phos);transform:translateX(-50%);box-shadow:0 0 7px var(--phos);z-index:2;transition:left .18s ease}
+    .ft-handle.after{border-color:var(--green);box-shadow:0 0 7px var(--green)}
+    .ft-hlabel{position:absolute;top:-15px;left:50%;transform:translateX(-50%);font-size:9px;color:var(--phos);white-space:nowrap;font-family:var(--mono)}
+    .ft-handle.after .ft-hlabel{top:18px;color:var(--green)}
+    .ft-panehead{display:flex;border-bottom:1px solid var(--line);background:var(--ink2)}
+    .ft-ph{flex:1;display:flex;align-items:center;gap:8px;padding:7px 10px;min-width:0}
+    .ft-ph:first-child{border-right:1px solid var(--line)}
+    .ft-diff-wrap{display:grid;grid-template-columns:185px 1fr;gap:14px;align-items:start}
+    .ft-side{border-right:1px solid var(--line);padding-right:10px;max-height:72vh;overflow-y:auto;position:sticky;top:0}
+    .ft-frow{display:flex;justify-content:space-between;gap:8px;padding:5px 8px;border-radius:5px;cursor:pointer;font-size:11.5px;color:var(--dim);transition:background .15s,color .15s}
+    .ft-frow:hover{background:var(--ink3);color:var(--text)}
+    .ft-frow.active{background:var(--ink3);color:var(--phos);border-left:2px solid var(--phos);padding-left:6px}
+    .ft-fname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ft-fct{color:var(--faint);flex:none}
+    @media(max-width:900px){.ft-diff-wrap{grid-template-columns:1fr}.ft-side{display:none}}
+    </style>
     <section id="view-files" style="display:none">
       <div class="searchrow">
         <input type="text" id="ft-q" placeholder="file path… (loader.py, src/checkout, recall)" style="flex:1;min-width:280px">
@@ -479,7 +674,61 @@ button.danger:hover{background:#ff8557}
     <section id="view-settings" style="display:none"><div class="loading">loading…</div></section>
 
     <section id="view-stats" style="display:none"><div class="loading">loading…</div></section>
+    <section id="view-logs" style="display:none"><div class="loading">loading…</div></section>
   </main>
+</div>
+
+<style>
+  #botbar{position:fixed;left:0;right:0;bottom:0;height:26px;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 16px;font-size:11px;color:var(--dim);background:var(--ink,#0b0d10);border-top:1px solid var(--line);z-index:40;white-space:nowrap;font-family:var(--mono,ui-monospace,monospace)}
+  #botbar b{color:var(--text);font-weight:600}
+  #botbar .dot{color:var(--green)}
+  #botbar #bb-status,#botbar #bb-tabinfo{flex:none}
+  #botbar .bb-center{display:flex;gap:14px;align-items:center;min-width:0;overflow:hidden}
+  #botbar #bb-backfill:not(:empty){padding-left:0}
+  #botbar .bb-ctl{cursor:pointer;padding:0 4px;border-radius:3px;user-select:none;transition:background .15s,transform .12s}
+  #botbar .bb-ctl:hover{background:var(--ink3)}
+  #botbar .bb-ctl:active{transform:scale(.86)}
+  main{padding-bottom:34px}
+</style>
+<style>
+#palette{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:100;display:none;align-items:flex-start;justify-content:center;padding-top:12vh}
+#palette.open{display:flex}
+.pal-box{width:min(640px,92vw);background:var(--ink2);border:1px solid var(--line);border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.6);overflow:hidden;max-height:76vh;display:flex;flex-direction:column}
+#pal-q{width:100%;background:transparent;border:0;border-bottom:1px solid var(--line);color:var(--text);font:inherit;font-size:15px;padding:15px 18px;outline:none;box-sizing:border-box}
+#pal-res{overflow-y:auto;padding:6px}
+.pal-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:7px;cursor:pointer}
+.pal-ic{width:18px;text-align:center;flex:none;color:var(--faint)}
+.pal-main{flex:1;min-width:0}
+.pal-t{color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}
+.pal-s{font-size:10.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pal-item.sel{background:var(--ink3)}
+.pal-item.sel .pal-ic{color:var(--phos)}
+.pal-kind{font-size:8.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);border:1px solid var(--line);border-radius:3px;padding:0 4px;flex:none}
+.pal-sect{font-size:11px;color:var(--faint);padding:10px 12px}
+.pal-foot{display:flex;gap:16px;padding:8px 14px;border-top:1px solid var(--line);font-size:10px;color:var(--faint)}
+.hit .grade{position:absolute;top:10px;right:14px;font:700 12px var(--serif);width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:1.5px solid;background:var(--ink)}
+.g-A{color:var(--green);border-color:var(--green)}
+.g-B{color:var(--cyan);border-color:var(--cyan)}
+.g-C{color:var(--phos);border-color:var(--phos)}
+.g-D{color:var(--ember);border-color:var(--ember)}
+.bf-job{padding:5px 0;border-top:1px solid var(--line)}
+.rl-badge{font-size:8px;color:var(--ember);border:1px solid var(--ember);border-radius:8px;padding:0 5px;margin-left:5px;white-space:nowrap;animation:flGlow 2s ease-in-out infinite}
+.bf-job:first-child{border-top:0}
+.bf-jobhead{display:flex;align-items:center;gap:6px;font-size:11px}
+.bf-joblabel{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+.bf-jobctl{display:flex;gap:5px;align-items:center;flex:none}
+</style>
+<div id="palette" onclick="if(event.target===this)palClose()">
+  <div class="pal-box">
+    <input id="pal-q" placeholder="Search the vault — sessions · threads · jump to a surface…" oninput="palInput()" onkeydown="palKey(event)" autocomplete="off" spellcheck="false">
+    <div id="pal-res"></div>
+    <div class="pal-foot"><span>↑↓ navigate</span><span>↵ open</span><span>esc close</span></div>
+  </div>
+</div>
+<div id="botbar">
+  <span id="bb-status"><span class="dot">●</span> indexer live · <span class="dot">●</span> vault healthy · <span class="dot" id="bb-carddot" style="color:var(--faint)">●</span> live carding</span>
+  <span class="bb-center"><span id="bb-stats">…</span><span id="bb-backfill"></span></span>
+  <span id="bb-tabinfo"><b id="bb-tab">search</b> · ⌘K palette</span>
 </div>
 
 <script>
@@ -511,21 +760,26 @@ let activeTab="search";
 function showTab(name){
   if(name!=="costs")dtip.hide&&dtip.hide();
   activeTab=name;
+  if($("#bb-tab"))$("#bb-tab").textContent=name;
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
-  for(const v of ["search","thread","compose","graph","surgery","files","cards","costs","settings","stats"])
+  for(const v of ["search","thread","compose","graph","editor","prune","files","cards","costs","settings","stats","logs"])
     $("#view-"+v).style.display="none";
   $("#view-"+(name==="search"&&currentThread==="open"?"thread":name)).style.display="";
   if(name==="compose")renderLoom();
   if(name==="cards")loadCards();
   if(name==="stats")loadStats();
+  if(name==="logs")loadLogs();
   if(name==="graph"){loadGraph().then(()=>{
     if(SEL.session&&$("#g-session").value!==SEL.session){
       $("#g-session").value=SEL.session;loadGraph(true);}})}
-  if(name==="surgery"){initSurgery().then(()=>{
-    if(SEL.session){
-      $("#s-session").value=SEL.session;
-      if(lastAnalyzed!==SEL.session){lastAnalyzed=SEL.session;loadSurgery();}
-    }})}
+  if(name==="editor"){initEditor().then(()=>{
+    const sel=$("#ap-session");
+    if(SEL.session)sel.value=SEL.session;
+    if(!sel.value&&sel.options.length)sel.value=sel.options[0].value;
+    if(sel.value&&sel.value!==EDIT_LOADED)loadEditor();})}
+  if(name==="prune"){initPrune().then(()=>{
+    if(SEL.session&&$("#pr-session").value!==SEL.session){
+      $("#pr-session").value=SEL.session;previewPrune();}})}
   if(name==="files"&&SEL.session)ftSession(SEL.session);
   if(name==="costs")loadDashboard();
   if(name==="settings")loadSettings();
@@ -533,17 +787,80 @@ function showTab(name){
 
 /* ── header stats ── */
 api("/api/stats").then(s=>{
-  $("#statsbar").innerHTML=
+  if($("#statsbar"))$("#statsbar").innerHTML=
     `<div><b>${fmt(s.records)}</b> <span>records</span></div>
      <div><b>${fmt(s.threads)}</b> <span>threads</span></div>
      <div><b>${fmt(s.sessions)}</b> <span>sessions</span></div>
      <div><b>${fmt(s.cards)}</b> <span>cards</span></div>
      <div><b>${fmt(s.vault_bytes)}B</b> <span>vault</span></div>`;
+  if($("#bb-stats"))$("#bb-stats").innerHTML=
+    `<b>${fmt(s.vault_bytes)}B</b> vault · <b>${fmt(s.records)}</b> turns · `+
+    `<b>${fmt(s.threads)}</b> threads · <b>${fmt(s.sessions)}</b> sessions · `+
+    `<b>${fmt(s.cards)}</b> cards`;
 });
 
 /* ── sidebar tree ── */
+const SESSION_TITLES={};
+function modelShort(m){return !m?"":/opus|fable/.test(m)?"opus":/sonnet/.test(m)?"sonnet":/haiku/.test(m)?"haiku":String(m).replace(/^claude-/,"").slice(0,10);}
+function modelBadge(m){
+  if(!m)return "";
+  const [lbl,col]=/opus|fable/.test(m)?["opus","var(--ember)"]:/sonnet/.test(m)?["sonnet","var(--cyan)"]:/haiku/.test(m)?["haiku","var(--green)"]:[m.replace(/^claude-/,"").slice(0,8),"var(--dim)"];
+  return `<span class="mbadge" style="color:${col};border-color:${col}">${lbl}</span>`;
+}
+function relTime(ts){
+  if(!ts)return "";
+  const d=(Date.now()-new Date(ts).getTime())/1000;
+  if(isNaN(d))return String(ts).slice(0,10);
+  if(d<60)return "just now";
+  if(d<3600)return Math.floor(d/60)+"m ago";
+  if(d<86400)return Math.floor(d/3600)+"h ago";
+  if(d<2592000)return Math.floor(d/86400)+"d ago";
+  return String(ts).slice(0,10);
+}
+function isLive(ts){return ts&&(Date.now()-new Date(ts).getTime())<900000;}
+async function loadLogs(){
+  const box=$("#view-logs");box.innerHTML='<div class="loading">reading the logbook…</div>';
+  const d=await api("/api/logs");
+  if(d.error){box.innerHTML=`<div class="warnbox">${esc(d.error)}</div>`;return}
+  window.LOG_ERRORS=d.errors||"";ackLogErrors(d);
+  const opRow=o=>`<div class="hit" style="padding:6px 12px;display:flex;gap:12px;align-items:baseline">
+    <span class="pal-kind">${esc(o.kind||'')}</span>
+    <span style="color:var(--dim);font-size:11px;flex:none">${esc(String(o.ts||'').slice(0,19))}</span>
+    <span style="color:var(--faint);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1">${esc(String(o.detail||'').replace(/\s+/g,' ').slice(0,170))}</span></div>`;
+  const atRow=a=>`<div class="hit" style="padding:5px 12px;display:flex;gap:10px;align-items:baseline">
+    <span style="color:${a.ok?'var(--green)':'var(--ember)'};flex:none">${a.ok?'✓':'✗'}</span>
+    <span style="color:var(--dim);font-size:11px;flex:none">${esc(String(a.ts||'').slice(0,19))}</span>
+    <span style="font-size:11px;flex:none">${esc(a.provider||'')} · ${esc(a.model||'')}</span>
+    <span style="color:var(--faint);font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.reason||'')}</span></div>`;
+  box.innerHTML=`
+    <div style="display:flex;gap:10px;align-items:baseline;margin-bottom:14px">
+      <h2 style="margin:0;color:var(--phos);font-family:var(--serif)">Logs</h2>
+      <span class="hint">everything fable tracked — operations · card generation · errors</span>
+      <button class="ghost" style="margin-left:auto" onclick="loadLogs()">↻ refresh</button>
+    </div>
+    <div class="genwrap" style="margin-bottom:14px">
+      <b style="color:var(--phos)">operations</b> <span class="hint">prune · slim · surgery · curate · index · search (${d.ops.length})</span>
+      <div class="results" style="margin-top:8px;max-height:34vh;overflow:auto">${d.ops.map(opRow).join("")||'<div class="empty">no ops recorded yet</div>'}</div>
+    </div>
+    <div class="genwrap" style="margin-bottom:14px">
+      <b style="color:var(--phos)">card generation</b> <span class="hint">provider attempts + failure reasons (${d.attempts.length})</span>
+      <div class="results" style="margin-top:8px;max-height:26vh;overflow:auto">${d.attempts.map(atRow).join("")||'<div class="empty">no card attempts yet</div>'}</div>
+    </div>
+    <div class="genwrap">
+      <b style="color:var(--ember)">errors.log</b> <span class="hint">tail</span>
+      <span class="bf-btn" style="float:right" onclick="copyText(this,LOG_ERRORS)" title="copy the full error tail to clipboard">⧉ copy</span>
+      <pre style="margin-top:8px;max-height:28vh;overflow:auto;font-size:10.5px;color:var(--dim);white-space:pre-wrap;word-break:break-all;font-family:var(--mono)">${esc(d.errors||"— clean —")}</pre>
+    </div>`;
+}
+function copyText(btn,text){navigator.clipboard.writeText(text||"").then(()=>{const o=btn.innerHTML;btn.innerHTML="✓ copied";btn.classList.add("copied");setTimeout(()=>{btn.innerHTML=o;btn.classList.remove("copied")},1200)}).catch(()=>{});}
+let LOG_ACK=+localStorage.getItem("fable-logack")||0;
+function markLogErrors(d){const dot=$("#log-errdot");if(dot)dot.style.display=(d.errors||"").length>LOG_ACK?"":"none";}
+function ackLogErrors(d){LOG_ACK=(d.errors||"").length;localStorage.setItem("fable-logack",LOG_ACK);const dot=$("#log-errdot");if(dot)dot.style.display="none";}
+function checkLogErrors(){api("/api/logs").then(markLogErrors).catch(()=>{});}
+setTimeout(checkLogErrors,1500);setInterval(checkLogErrors,45000);
 api("/api/projects").then(projects=>{
   if(!projects.length){$("#tree").innerHTML='<div class="empty">no sessions indexed<br>run: fable discover</div>';return}
+  projects.forEach(p=>p.sessions.forEach(s=>{SESSION_TITLES[s.session_id]=s.title;}));
   $("#tree").innerHTML=projects.map((p,i)=>`
     <div class="proj ${i===0?"open":""}" data-project="${esc(p.project)}">
       <div class="proj-name" onclick="this.parentNode.classList.toggle('open')">
@@ -553,8 +870,9 @@ api("/api/projects").then(projects=>{
       </div>
       <div class="bf-slot"></div>
       <div class="sess">${p.sessions.map(s=>`
-        <a onclick="openSession('${esc(s.session_id)}',this)" title="session ${esc(s.session_id)} — click to list its threads">
-          <div class="sess-name">${s.pinned?'<span style="color:var(--phos)">★ </span>':""}${esc(s.title||s.session_id.slice(0,12))}<span class="meta"> · ${s.threads}th</span></div>
+        <a data-sid="${esc(s.session_id)}" onclick="openSession('${esc(s.session_id)}',this)" title="session ${esc(s.session_id)} — click to list its threads">
+          <div class="sess-name">${s.pinned?'<span style="color:var(--phos)">★ </span>':""}${esc(s.title||s.session_id.slice(0,12))}${isLive(s.last_ts)?'<span class="livedot" title="active in the last 15 min"> ●</span>':""}</div>
+          <div class="meta">${modelBadge(s.model)}${s.threads}th · ${fmt(s.est_tokens||0)} tok${s.last_ts?` · ${relTime(s.last_ts)}`:""}</div>
           <div class="sess-actions">
             <span class="bf-btn" title="${s.pinned?"unpin this session":"pin this session to the top of the project"}" onclick="event.stopPropagation();togglePin('${esc(s.session_id)}',${s.pinned?0:1})">★ ${s.pinned?"unpin":"pin"}</span>
             <span class="bf-btn" title="generate summary cards for ONLY this session's threads (uses the Backfill engine provider/model above)" onclick="event.stopPropagation();startBackfill(null,'${esc(s.session_id)}')">✦ cards</span>
@@ -567,19 +885,106 @@ api("/api/projects").then(projects=>{
 
 /* ── global selection: the sidebar drives every workspace ── */
 const SEL={project:null,session:null};
+/* ── shell: breadcrumb + global palette ── */
+const SURFACE_LABEL={search:"Search",editor:"Context Editor",files:"Files",cards:"Cards",
+  prune:"Prune",compose:"Compose",graph:"Graph",costs:"Dashboard",stats:"Index",settings:"Settings",logs:"Logs"};
+function renderCrumb(){
+  const c=$("#crumb");if(!c)return;
+  let parts=[];
+  if(SEL.project)parts.push('<a onclick="currentThread=null;showTab(\'search\')">'+esc(SEL.project)+'</a>');
+  if(SEL.session)parts.push('<span title="'+esc(SEL.session)+'">'+esc(SESSION_TITLES[SEL.session]||String(SEL.session).slice(0,10)+'…')+'</span>');
+  parts.push('<b>'+esc(SURFACE_LABEL[activeTab]||activeTab)+'</b>');
+  if(activeTab==="files"&&typeof FT_PATH!=="undefined"&&FT_PATH)parts.push('<b>'+esc(FT_PATH.split("/").pop())+'</b>');
+  if(currentThread==="open")parts.push('<b>thread</b>');
+  c.innerHTML='<span class="sep">/</span> '+parts.join(' <span class="sep">/</span> ');
+}
+let PAL_ITEMS=[],PAL_SEL=0,PAL_TIMER=null,PAL_PROJ=null;
+function openPalette(){const p=$("#palette");if(!p){showTab('search');return}p.classList.add("open");const q=$("#pal-q");q.value="";q.focus();palSearch("");}
+function palClose(){const p=$("#palette");if(p)p.classList.remove("open");}
+function palInput(){clearTimeout(PAL_TIMER);PAL_TIMER=setTimeout(()=>palSearch($("#pal-q").value.trim()),140);}
+async function palSearch(q){
+  const ql=q.toLowerCase(),items=[];
+  for(const [k,lbl] of Object.entries(SURFACE_LABEL)){
+    if(!q||lbl.toLowerCase().includes(ql))items.push({kind:"go",ic:"◎",t:lbl,s:"jump to surface",act:()=>showTab(k)});
+  }
+  try{
+    if(!PAL_PROJ)PAL_PROJ=await api("/api/projects");
+    for(const p of PAL_PROJ)for(const s of p.sessions){
+      const name=s.title||s.session_id;
+      if(!q||name.toLowerCase().includes(ql)||(p.project||"").toLowerCase().includes(ql))
+        items.push({kind:"session",ic:"❡",t:name,s:`${p.project} · ${s.threads}th · ${fmt(s.est_tokens||0)} tok`,act:()=>openSession(s.session_id)});
+    }
+  }catch(e){}
+  if(q){
+    try{
+      const r=await api("/api/search",{q,n:"6"});
+      const list=Array.isArray(r)?r:(r.results||[]);
+      list.forEach(t=>items.push({kind:"thread",ic:"⟡",t:t.title||t.prompt_id||"thread",s:`${t.project||""} ${t.turn_count?t.turn_count+"t":""}`.trim(),act:()=>{openSession(t.session_id||null);openThread(t.prompt_id);}}));
+    }catch(e){}
+  }
+  PAL_ITEMS=items.slice(0,40);PAL_SEL=0;palRender();
+}
+function palRender(){
+  const box=$("#pal-res");if(!box)return;
+  if(!PAL_ITEMS.length){box.innerHTML='<div class="pal-sect">no matches — try a different term</div>';return}
+  box.innerHTML=PAL_ITEMS.map((it,i)=>`<div class="pal-item ${i===PAL_SEL?"sel":""}" onclick="palAct(${i})">
+    <span class="pal-ic">${it.ic}</span>
+    <div class="pal-main"><div class="pal-t">${esc(it.t)}</div>${it.s?`<div class="pal-s">${esc(it.s)}</div>`:""}</div>
+    <span class="pal-kind">${it.kind}</span></div>`).join("");
+  const sel=box.querySelector(".pal-item.sel");if(sel)sel.scrollIntoView({block:"nearest"});
+}
+function palMove(d){if(PAL_ITEMS.length){PAL_SEL=(PAL_SEL+d+PAL_ITEMS.length)%PAL_ITEMS.length;palRender();}}
+function palAct(i){const it=PAL_ITEMS[i!=null?i:PAL_SEL];if(!it)return;palClose();it.act();}
+function palKey(e){
+  if(e.key==="ArrowDown"){e.preventDefault();palMove(1);}
+  else if(e.key==="ArrowUp"){e.preventDefault();palMove(-1);}
+  else if(e.key==="Enter"){e.preventDefault();palAct();}
+  else if(e.key==="Escape"){e.preventDefault();palClose();}
+}
+/* resizable + collapsible session tree */
+let TREE_LAST=290;
+function toggleTree(){
+  const app=document.querySelector(".app");
+  const cur=parseInt(getComputedStyle(app).getPropertyValue("--tree-w"))||0;
+  treeWidth(cur>10?0:(TREE_LAST||290));
+}
+function treeWidth(w){
+  const app=document.querySelector(".app");
+  w=Math.max(0,Math.min(560,Math.round(w)));
+  app.style.setProperty("--tree-w",w+"px");
+  localStorage.setItem("fable-tree-w",w);
+  if(w>10)TREE_LAST=w;
+}
+(function(){
+  const app=document.querySelector(".app"),h=document.getElementById("tree-resize");
+  const saved=parseInt(localStorage.getItem("fable-tree-w")||"");
+  if(!isNaN(saved)){app.style.setProperty("--tree-w",saved+"px");if(saved>10)TREE_LAST=saved;}
+  if(!h)return;
+  let drag=false;
+  h.addEventListener("mousedown",e=>{drag=true;h.classList.add("drag");document.body.style.cursor="col-resize";document.body.style.userSelect="none";e.preventDefault();});
+  window.addEventListener("mousemove",e=>{if(drag)treeWidth(e.clientX-58);});
+  window.addEventListener("mouseup",()=>{if(drag){drag=false;h.classList.remove("drag");document.body.style.cursor="";document.body.style.userSelect="";}});
+  h.addEventListener("dblclick",()=>treeWidth(290));
+  document.addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key==="\\"){e.preventDefault();toggleTree();}});
+})();
+document.addEventListener("keydown",e=>{
+  if((e.metaKey||e.ctrlKey)&&(e.key==="k"||e.key==="K")){e.preventDefault();openPalette();}
+});
 let lastAnalyzed=null;
 function setSelection(project,session){
   SEL.project=project||SEL.project;SEL.session=session||null;
   // search project filter follows
   const fp=$("#f-project");
   if(SEL.project&&[...fp.options].some(o=>o.value===SEL.project)){
-    if(fp.value!==SEL.project){fp.value=SEL.project;fp.dispatchEvent(new Event("change"))}
+    if(fp.value!==SEL.project){fp.value=SEL.project;if(activeTab==="search")fp.dispatchEvent(new Event("change"))}
   }
-  // graph + surgery dropdowns follow
+  // graph + editor + prune dropdowns follow
   const gs=$("#g-session");
   if(SEL.session&&gs&&[...gs.options].some(o=>o.value===SEL.session))gs.value=SEL.session;
-  const ss=$("#s-session");
-  if(SEL.session&&ss&&[...ss.options].some(o=>o.value===SEL.session))ss.value=SEL.session;
+  const es=$("#ap-session");
+  if(SEL.session&&es&&[...es.options].some(o=>o.value===SEL.session))es.value=SEL.session;
+  const ps=$("#pr-session");
+  if(SEL.session&&ps&&[...ps.options].some(o=>o.value===SEL.session))ps.value=SEL.session;
   const anchor=$("#bk-anchor");
   if(anchor)anchor.textContent="→ "+(SEL.session?SEL.session.slice(0,8):SEL.project||"pick a session");
   // search scope select mirrors the selected transcript
@@ -595,15 +1000,15 @@ async function openSession(sid,el){
   if(el)el.classList.add("active");
   setSelection(el?.closest(".proj")?.dataset.project,sid);
   // the selection loads INTO whatever workspace is open — no tab hijack
-  if(activeTab==="surgery"){
-    $("#s-session").value=sid;lastAnalyzed=sid;loadSurgery();return}
+  if(activeTab==="editor"){await initEditor();$("#ap-session").value=sid;loadEditor();return}
   if(activeTab==="graph"){$("#g-session").value=sid;loadGraph(true);return}
   if(activeTab==="compose"){renderLoom();return}
   if(activeTab==="files"){ftSession(sid);return}
+  if(activeTab==="prune"){$("#pr-session").value=sid;previewPrune();return}
   if(activeTab==="costs"){DASH_SCOPE=null;showTab("costs");return}
-  if(activeTab==="settings"||activeTab==="stats"
-     ||activeTab==="cards"){showTab(activeTab)}
-  else showTab("search");
+  if(activeTab==="cards"){loadCards(sid);return}
+  if(activeTab==="settings"||activeTab==="stats"){showTab(activeTab)}
+  else {currentThread=null;showTab("search");}
   currentThread=null;
   if(activeTab!=="search"&&activeTab!=="thread")return;
   $("#results").innerHTML='<div class="loading">loading session threads…</div>';
@@ -636,7 +1041,7 @@ api("/api/facets").then(f=>{
 async function doSearch(){
   const p=searchParams();
   if(!p.q&&!(p.op||p.target||p.kind||p.model||p.project||p.session))return;
-  showTab("search");currentThread=null;
+  currentThread=null;showTab("search");
   $("#results").innerHTML='<div class="loading">recalling…</div>';
   const hits=await api("/api/search",searchParams());
   if(hits.error){$("#results").innerHTML=`<div class="empty">${esc(hits.error)}</div>`;return}
@@ -659,7 +1064,8 @@ function hitHtml(h){
   if(h.agent==null&&h.sidechain_turns!=null)
     h.agent=(h.sidechain_turns*2>(h.turn_count||0))?"subagent":"main";
   return `<div class="hit t-${esc(type)}" onclick="openThread('${esc(h.prompt_id)}')">
-    ${h.score?`<div class="score">▮ ${h.score}</div>`:""}
+    ${h.score_pct!=null?`<div class="score" title="relevance · top hit = 100">▮ ${h.score_pct}</div>`:(h.score?`<div class="score">▮ ${h.score}</div>`:"")}
+    ${h.grade?`<div class="grade g-${esc(h.grade)}" title="generation health: ${h.gen_attempts||1} attempt${(h.gen_attempts||1)>1?'s':''}${h.gen_fails?', '+h.gen_fails+' failed before success':' — clean first try'}">${esc(h.grade)}</div>`:""}
     <div class="title">${esc(h.title||"")}${h.title?"":`<em>${esc(h.prompt_id)}</em>`}</div>
     <div class="row2">
       ${type?`<span class="badge b-${esc(type)}">${esc(type)}</span>`:""}
@@ -689,7 +1095,7 @@ async function openThread(id,budget){
   view.innerHTML=`
     <div class="viewer">
       <div class="viewer-top">
-        <button class="ghost" onclick="showTab('search');currentThread=null">← back</button>
+        <button class="ghost" onclick="currentThread=null;showTab('search')">← back</button>
         <h2>${esc(card?.title||"thread")}</h2>
         <span class="id">${esc(t.prompt_id)}</span>
         <div class="budget-wrap">
@@ -936,48 +1342,60 @@ function drawGraph(raw){
 }
 
 /* ── surgery ── */
-let surgeryInit=false;
-async function initSurgery(){
-  if(surgeryInit)return;surgeryInit=true;
-  $("#s-session").addEventListener("change",()=>{lastAnalyzed=$("#s-session").value;loadSurgery()});
-  const sel=$("#s-session");
+let pruneInit=false;
+let PR_CATS=[];
+async function loadPruneCategories(){
+  const session=$("#pr-session").value; if(!session)return;
+  const wrap=$("#pr-cats-wrap"), box=$("#pr-cats");
+  if(!wrap||!box)return;
+  box.innerHTML='<span class="hint">analysing per-category…</span>'; wrap.style.display="";
+  const d=await api("/api/prune/analyze",{session});
+  if(d.error){box.innerHTML=`<span class="warnbox" style="margin:0">${esc(d.error)}</span>`;return}
+  PR_CATS=d.categories||[];
+  box.innerHTML=PR_CATS.map((c,i)=>`
+    <label class="surg-row" style="display:flex;gap:9px;align-items:flex-start;cursor:pointer;padding:6px 4px">
+      <input type="checkbox" data-i="${i}" ${c.default?"checked":""} onchange="prCatTotal()" style="accent-color:var(--phos);margin-top:3px;flex:none">
+      <div style="flex:1;min-width:0">
+        <div><b>${esc(c.label)}</b> <span class="hint">· ${fmt(c.count)} items · ~${fmt(c.tokens)} tok</span></div>
+        <div class="hint">${esc(c.why)}</div>
+      </div>
+    </label>`).join("")||'<span class="hint">nothing recoverable by category</span>';
+  prCatTotal();
+}
+function prCatTotal(){
+  let tok=0; document.querySelectorAll('#pr-cats input:checked').forEach(cb=>{tok+=(PR_CATS[+cb.dataset.i]||{}).tokens||0;});
+  if($("#pr-cat-tot"))$("#pr-cat-tot").textContent=`~${fmt(tok)} tok`;
+}
+async function applyPruneCategories(){
+  const session=$("#pr-session").value; if(!session)return;
+  const keys=[...document.querySelectorAll('#pr-cats input:checked')].map(cb=>(PR_CATS[+cb.dataset.i]||{}).key).filter(Boolean);
+  const rep=$("#pr-cat-report"); if(!rep)return;
+  if(!keys.length){rep.innerHTML='<span class="warnbox" style="margin:0">tick at least one category</span>';return}
+  if(!await confirmModal(`Slim ${keys.length} categor${keys.length>1?"ies":"y"} in this session's live transcript?\n\nA vault version is sealed first — fully recoverable. Records and the chain are kept; only the selected heavy blocks are stubbed.`))return;
+  rep.innerHTML='<span class="loading" style="padding:0">sealing → slimming → reindexing…</span>';
+  const r=await fetch("/api/prune/slim",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session,confirm:true,categories:keys})}).then(x=>x.json());
+  if(r.error){rep.innerHTML=`<span class="warnbox" style="margin:0">${esc(r.error)}</span>`;return}
+  rep.innerHTML=`<span style="color:var(--green)">✓ slimmed ${fmt(r.blocks_slimmed)} blocks · sealed v${r.version} · resume the session in Claude Code</span>`;
+  loadPruneCategories();
+}
+async function initPrune(){
+  if(pruneInit)return;pruneInit=true;
+  const sel=$("#pr-session");
   const projects=await api("/api/projects");
   projects.forEach(p=>p.sessions.forEach(s=>{
-    const o=document.createElement("option");
-    o.value=s.session_id;
+    const o=document.createElement("option");o.value=s.session_id;
     o.textContent=`${p.project} / ${s.title||s.session_id.slice(0,8)} (${s.threads} threads)`;
     sel.appendChild(o);
   }));
-  $("#s-load").onclick=loadSurgery;
-  $("#s-preview").onclick=previewSurgery;
-  $("#s-apply").onclick=applySurgery;
-}
-async function loadSurgery(){
-  const session=$("#s-session").value;
-  $("#s-report").innerHTML="";
-  $("#s-list").innerHTML='<div class="loading">analyzing threads…</div>';
-  const [sug,threads]=await Promise.all([
-    api("/api/suggestions",{session}),api("/api/threads",{session})]);
-  if(sug.error||threads.error){
-    $("#s-list").innerHTML=`<div class="empty">${esc(sug.error||threads.error)}</div>`;return}
-  const reasons={};(sug||[]).forEach(s=>reasons[s.prompt_id]=s.reasons);
-  $("#s-preview").style.display="";
-  previewPrune();  // the hero: savings appear without being asked
-  $("#s-list").innerHTML=threads.map(t=>`
-    <div class="surg-row">
-      <input type="checkbox" value="${esc(t.prompt_id)}" ${reasons[t.prompt_id]?"checked":""}>
-      <div style="flex:1">
-        <div>${esc(t.title||t.prompt_id)} <span class="hint">· ${t.turn_count} turns · ~${fmt(t.est_tokens)} tok · ${esc((t.first_ts||"").slice(0,10))}</span></div>
-        ${reasons[t.prompt_id]?`<div class="why">⚠ ${reasons[t.prompt_id].map(esc).join(" · ")}</div>`:""}
-      </div>
-    </div>`).join("")||'<div class="empty">no threads</div>';
+  sel.addEventListener("change",previewPrune);
 }
 async function previewPrune(){
+  const session=$("#pr-session").value;if(!session)return;
   const box=$("#p-report");
   box.innerHTML='<span class="loading" style="padding:0">scanning…</span>';
   const r=await fetch("/api/prune/plan",{method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({session:$("#s-session").value})}).then(x=>x.json());
+    body:JSON.stringify({session})}).then(x=>x.json());
   if(r.error){box.innerHTML=`<span class="warnbox" style="margin:0">${esc(r.error)}</span>`;return}
   window.PRUNE_PREV=r;
   renderPruneHero();
@@ -1025,26 +1443,24 @@ async function applyPrune(){
   $("#p-report").innerHTML='<span class="loading" style="padding:0">backup → gate → atomic rewrite…</span>';
   const r=await fetch("/api/prune/apply",{method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({session:$("#s-session").value,confirm:true,
+    body:JSON.stringify({session:$("#pr-session").value,confirm:true,
       strip_images:$("#p-img").checked})}).then(x=>x.json());
   if(r.error){$("#p-report").innerHTML=`<span class="warnbox">${esc(r.error)}</span>`;if(/ACTIVE/i.test(r.error))previewPrune();return}
   $("#p-apply").style.display="none";
   $("#p-report").innerHTML=`<span style="color:var(--green)">✓ pruned — ${fmt(r.chars)}B written,
     chain ${r.chain_valid?"VALID":"BROKEN"}, backup ${esc(r.backup||"sealed")}, re-indexed.</span>`;
 }
-function selectedDrops(){
-  return [...document.querySelectorAll("#s-list input:checked")].map(i=>i.value);
-}
+function selectedDrops(){return [...SURG_DROPS];}
 async function previewSurgery(){
   const drops=selectedDrops();
-  if(!drops.length){$("#s-report").innerHTML='<div class="warnbox">nothing selected</div>';return}
-  $("#s-report").innerHTML='<div class="loading">simulating…</div>';
+  if(!drops.length){$("#surg-report").innerHTML='<div class="warnbox" style="margin:0">tick at least one thread to remove</div>';return}
+  $("#surg-report").innerHTML='<div class="loading" style="padding:0">simulating…</div>';
   const r=await fetch("/api/surgery/plan",{method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({session:$("#s-session").value,drops})}).then(x=>x.json());
-  if(r.error){$("#s-report").innerHTML=`<div class="warnbox">${esc(r.error)}</div>`;return}
-  $("#s-apply").style.display="";
-  $("#s-report").innerHTML=`<div class="surg-report">
+    body:JSON.stringify({session:$("#ap-session").value,drops})}).then(x=>x.json());
+  if(r.error){$("#surg-report").innerHTML=`<div class="warnbox" style="margin:0">${esc(r.error)}</div>`;return}
+  $("#surg-apply").style.display="";
+  $("#surg-report").innerHTML=`<div class="surg-report" style="margin:0">
     plan: drop <b>${r.threads_dropped}</b> threads → remove <b>${r.messages_removed}</b> records,
     <b>${fmt(r.bytes_removed)}B</b> (~${fmt(r.est_tokens_removed)} tok) ·
     keep ${r.messages_kept} records · re-parent ${r.reparented} ·
@@ -1052,17 +1468,241 @@ async function previewSurgery(){
   </div>`;
 }
 async function applySurgery(){
-  const drops=selectedDrops();
-  if(!await confirmModal(`Rewrite the live transcript without ${drops.length} thread(s)?\nA vault backup is taken first; dropped threads stay recallable.`))return;
-  $("#s-report").innerHTML='<div class="loading">backup → gate → atomic rewrite…</div>';
+  const drops=selectedDrops();if(!drops.length)return;
+  if(!await confirmModal(`Rewrite the live transcript without ${drops.length} thread(s)?\nA vault version is sealed first; removed threads stay recallable.`))return;
+  $("#surg-report").innerHTML='<div class="loading" style="padding:0">backup → gate → atomic rewrite…</div>';
   const r=await fetch("/api/surgery/apply",{method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({session:$("#s-session").value,drops,confirm:true})}).then(x=>x.json());
-  if(r.error){$("#s-report").innerHTML=`<div class="warnbox">${esc(r.error)}</div>`;return}
-  $("#s-apply").style.display="none";
-  $("#s-report").innerHTML=`<div class="surg-report">✓ surgery applied — removed ${r.messages_removed} records
-    (~${fmt(r.est_tokens_removed)} tok), backup ${esc(r.backup||"")} sealed, live file re-indexed.</div>`;
-  loadSurgery();
+    body:JSON.stringify({session:$("#ap-session").value,drops,confirm:true})}).then(x=>x.json());
+  if(r.error){$("#surg-report").innerHTML=`<div class="warnbox" style="margin:0">${esc(r.error)}</div>`;return}
+  $("#surg-apply").style.display="none";
+  $("#surg-report").innerHTML=`<div class="surg-report" style="margin:0">✓ surgery applied — removed ${r.messages_removed} records (~${fmt(r.est_tokens_removed)} tok), vault sealed, re-indexed.</div>`;
+  loadEditor();
+}
+
+/* ── Context Editor: Aperture (focus) + Surgery (remove) on one spine ── */
+let editorInit=false, AP_FOCUS=new Set(), AP_ROWS=[], AP_TOOLMAP={}, AP_QUERY="";
+let EDIT_MODE="read", EDIT_LOADED=null, EDIT_TOKEN=0, EDIT_THREADS={}, EDIT_GROUPS=[], EDIT_COLLAPSED=new Set(), SURG_DROPS=new Set();
+function syncSidebar(sid){document.querySelectorAll(".sess a").forEach(a=>a.classList.toggle("active",a.dataset.sid===sid));}
+function apSearch(){AP_QUERY=(($("#ap-q")||{}).value||"").trim().toLowerCase();renderEditor();}
+function apHi(text,q){const e=esc(text||"");if(!q)return e;try{return e.replace(new RegExp("("+q.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","ig"),'<mark style="background:var(--phos);color:var(--ink);border-radius:2px">$1</mark>')}catch(_){return e}}
+async function initEditor(){
+  if(editorInit)return;editorInit=true;
+  const sel=$("#ap-session");
+  const projects=await api("/api/projects");
+  projects.forEach(p=>p.sessions.forEach(s=>{
+    const o=document.createElement("option");o.value=s.session_id;
+    o.textContent=`${p.project} / ${s.title||s.session_id.slice(0,8)} (${s.threads} threads)`;
+    sel.appendChild(o);
+  }));
+  $("#ap-load").onclick=loadEditor;
+  sel.addEventListener("change",loadEditor);
+  edSteps();
+}
+function hideHeroes(){$("#ap-bar").style.display="none";$("#surg-bar").style.display="none";}
+async function loadEditor(){
+  const session=$("#ap-session").value;if(!session)return;
+  EDIT_LOADED=session;SEL.session=session;syncSidebar(session);renderCrumb();
+  AP_FOCUS=new Set();SURG_DROPS=new Set();AP_QUERY="";EDIT_COLLAPSED=new Set();
+  if($("#ap-q"))$("#ap-q").value="";
+  hideHeroes();$("#ap-list").innerHTML='<div class="loading">reading transcript…</div>';
+  const _tok=++EDIT_TOKEN;
+  const [rows,threads,sug]=await Promise.all([
+    api("/api/curate/timeline",{session}),
+    api("/api/threads",{session}),
+    api("/api/suggestions",{session})]);
+  if(_tok!==EDIT_TOKEN)return;   // a newer click superseded this load — drop it
+  if(rows.error){$("#ap-list").innerHTML=`<div class="empty">${esc(rows.error)}</div>`;return}
+  AP_ROWS=rows;AP_ROWS.forEach((r,i)=>r._i=i);AP_TOOLMAP={};
+  rows.forEach(r=>(r.tool_ids||[]).forEach(t=>{(AP_TOOLMAP[t]=AP_TOOLMAP[t]||[]).push(r.uuid)}));
+  EDIT_THREADS={};(threads||[]).forEach(t=>EDIT_THREADS[t.prompt_id]={title:t.title,turn_count:t.turn_count,est_tokens:t.est_tokens,models:t.models,grade:t.grade,summary:t.summary,reasons:null});
+  (sug||[]).forEach(s=>{if(EDIT_THREADS[s.prompt_id])EDIT_THREADS[s.prompt_id].reasons=s.reasons;SURG_DROPS.add(s.prompt_id);});
+  buildGroups();
+  $("#ap-report").innerHTML="";$("#surg-report").innerHTML="";$("#surg-apply").style.display="none";
+  if($("#ed-sub"))$("#ed-sub").textContent=SESSION_TITLES[session]||"";
+  edSetMode(EDIT_MODE);
+}
+function buildGroups(){
+  EDIT_GROUPS=[];let cur=null,nidx=0;
+  AP_ROWS.forEach(r=>{
+    if(r.is_wall||r.is_summary){EDIT_GROUPS.push({sep:r});cur=null;return}
+    if(r.thread){if(!cur||cur.thread!==r.thread){cur={key:r.thread,thread:r.thread,rows:[]};EDIT_GROUPS.push(cur);}}
+    else{if(!cur||cur.thread!==null){cur={key:"__none"+(nidx++),thread:null,rows:[]};EDIT_GROUPS.push(cur);}}
+    cur.rows.push(r);
+  });
+}
+function edSteps(){
+  const ap='<span><b>1</b> pick a session</span><span><b>2</b> ◎ tick TURNS to keep in FOCUS — tool pairs auto-included</span><span><b>3</b> optional summary of the rest (blank = hard cut)</span><span><b>4</b> APPLY — vault sealed, manual wall appended in place, resume same session</span>';
+  const sg='<span><b>1</b> pick a session — risky threads are pre-ticked with a reason</span><span><b>2</b> ⚕ tick whole THREADS to remove</span><span><b>3</b> PREVIEW — pure simulation, nothing written</span><span><b>4</b> APPLY — vault sealed, atomic rewrite, chain re-stitched</span>';
+  if($("#ed-steps"))$("#ed-steps").innerHTML=EDIT_MODE==="read"?'<span class="hint">browse the spine — switch to ◎ Aperture to KEEP turns in focus, or ⚕ Surgery to CUT dead threads</span>':(EDIT_MODE==="surgery"?sg:ap);
+}
+function edSetMode(mode){
+  EDIT_MODE=mode;
+  document.querySelectorAll(".ed-mode").forEach(e=>e.classList.toggle("active",e.dataset.mode===mode));
+  edSteps();
+  if(AP_ROWS.length&&mode!=="read"){$("#ap-bar").style.display=mode==="aperture"?"":"none";$("#surg-bar").style.display=mode==="surgery"?"":"none";}
+  else hideHeroes();
+  renderEditor();
+  if(mode==="aperture")apMeter();else if(mode==="surgery")surgMeter();else edStat();
+  const a=$("#ed-action");
+  if(a){a.className="ed-action bf-btn "+mode;
+    a.innerHTML=mode==="aperture"?"◉ Set wall &amp; resume":mode==="surgery"?"✕ Excise &amp; resume":"▶ Resume session";}
+}
+function edStat(){
+  const el=$("#ed-stat");if(!el)return;
+  if(!AP_ROWS.length){el.textContent="";return;}
+  const total=AP_ROWS.reduce((s,r)=>s+(r.tokens||0),0);
+  if(EDIT_MODE==="aperture"){
+    let tok=0;AP_ROWS.forEach(r=>{if(AP_FOCUS.has(r.uuid))tok+=r.tokens||0});
+    el.innerHTML=`<span style="color:var(--phos)">FOCUS</span> ${AP_FOCUS.size} turns · <b style="color:var(--phos)">${fmt(tok)}</b> kept of ${fmt(total)}`;
+  }else if(EDIT_MODE==="surgery"){
+    let tok=0;AP_ROWS.forEach(r=>{if(r.thread&&SURG_DROPS.has(r.thread))tok+=r.tokens||0});
+    el.innerHTML=`<span style="color:var(--ember)">CUT</span> ${SURG_DROPS.size} threads · reclaim <b style="color:var(--ember)">−${fmt(tok)}</b>`;
+  }else{
+    const threads=EDIT_GROUPS.filter(g=>g.thread).length;
+    const turns=AP_ROWS.filter(r=>!r.is_wall&&!r.is_summary).length;
+    el.innerHTML=`<b>${fmt(turns)}</b> turns · <b>${threads}</b> threads · <b>${fmt(total)}</b>`;
+  }
+}
+function edAction(){
+  if(EDIT_MODE==="aperture")applyCurate();
+  else if(EDIT_MODE==="surgery"){const sa=$("#surg-apply");(sa&&sa.style.display!=="none")?applySurgery():previewSurgery();}
+  else{const s=$("#ap-session").value;if(s)copyResume(s);}
+}
+function apKindColor(k){return k==="user"?"var(--phos)":k==="tool"?"var(--dim)":"var(--text)"}
+function apKindLabel(k){return k==="tool"?"tool ↩":k}
+function apLocal(ts){if(!ts)return"";try{return new Date(ts).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'})}catch(e){return(ts||'').slice(11,19)}}
+function apMatch(r,q){return (r.preview+" "+(r.full||"")).toLowerCase().includes(q)}
+function renderTurn(r){
+  const mode=EDIT_MODE,side=r.kind==="user"?"right":"left";
+  const foc=AP_FOCUS.has(r.uuid)&&mode==="aperture";
+  const tool=r.has_tool_use?'<span title="tool call">⚙</span>':r.has_tool_result?'<span title="tool result" style="color:var(--dim)">↩</span>':'';
+  const cb=mode==="aperture"?`<input type="checkbox" ${foc?'checked':''} onchange="apToggle('${esc(r.uuid)}',this.checked)">`:'';
+  return `<div class="ap-node ${side}${foc?' ap-on':''}" data-uuid="${esc(r.uuid)}">
+    <div class="ap-time" title="${esc(r.ts||'')}">${apLocal(r.ts)}</div>
+    <div class="ap-card${foc?' ap-on':''}">
+      <div class="ap-chead">
+        <label style="display:flex;gap:7px;align-items:center;cursor:pointer;min-width:0;flex:1">
+          ${cb}<b style="color:${apKindColor(r.kind)}">${esc(apKindLabel(r.kind))}</b>
+          <span class="hint">${fmt(r.tokens)} tok</span> ${tool}
+          ${r.is_sidechain?'<span class="hint">· subagent</span>':''}
+        </label>
+        <span class="ap-exp" onclick="apExpand(this,${r._i})">expand</span>
+      </div>
+      <div class="ap-prev">${apHi(r.preview,AP_QUERY)}</div>
+    </div></div>`;
+}
+function renderEditor(){
+  if(!AP_ROWS.length){$("#ap-list").innerHTML='<div class="empty">no turns</div>';return}
+  const q=AP_QUERY,mode=EDIT_MODE;let matches=0;
+  const html=EDIT_GROUPS.map(g=>{
+    if(g.sep){if(q)return "";const r=g.sep;return r.is_wall?`<div class="ap-sep ap-wall">▬▬ compaction wall ▬▬</div>`:`<details class="ap-sum"><summary>▤ compaction summary · ${fmt(r.tokens)} tok · <span style="color:var(--dim)">click to read the digest</span></summary><div class="ap-sum-body">${esc(r.full||r.preview)}</div></details>`;}
+    let rows=g.rows;
+    if(q){rows=rows.filter(r=>apMatch(r,q));if(!rows.length)return "";matches+=rows.length;}
+    const meta=g.thread?(EDIT_THREADS[g.thread]||{}):{};
+    const tok=g.rows.reduce((s,r)=>s+r.tokens,0);
+    const collapsed=EDIT_COLLAPSED.has(g.key)&&!q;   // default OPEN; fold for navigation
+    const dropped=mode==="surgery"&&g.thread&&SURG_DROPS.has(g.thread);
+    const focN=g.rows.filter(r=>AP_FOCUS.has(r.uuid)).length;
+    const title=meta.title||(g.thread?("thread "+g.thread.slice(0,8)):"· session start ·");
+    const reason=(mode==="surgery"&&meta.reasons)?`<div class="why">⚠ ${meta.reasons.map(esc).join(" · ")}</div>`:"";
+    const cbox=(mode==="surgery"&&g.thread)?`<input type="checkbox" ${(g.thread&&SURG_DROPS.has(g.thread))?'checked':''} onchange="surgToggle('${esc(g.thread)}',this.checked)" title="remove this whole thread">`:"";
+    const focInfo=(mode==="aperture")?`<span class="ed-foc-n">${focN?focN+' in focus':''}</span><span class="bf-btn" onclick="edFocusThread('${esc(g.key)}')" title="focus every turn in this thread">focus all</span>`:"";
+    const divider=`<div class="ed-divider${dropped?' ed-drop':''}">
+      <span class="ed-tw" onclick="edToggle('${esc(g.key)}')">${collapsed?'▸':'▾'}</span>
+      ${cbox}
+      <div style="flex:1;min-width:0"><div>${meta.grade?`<span class="grade-sm g-${esc(meta.grade)}" title="generation grade (card health)">${esc(meta.grade)}</span> `:''}<b>${esc(title)}</b> <span class="hint">· ${meta.models?modelBadge(meta.models)+' ':''}${g.rows.length} turns · ~${fmt(tok)} tok</span></div>${reason}</div>
+      ${focInfo}
+    </div>`;
+    const sumCard=(meta.summary&&!collapsed)?`<div class="ed-sumcard"><div class="ed-sumtext">${esc(meta.summary)}</div><div class="ed-sumchips"><span class="ed-chip">● AI summary</span>${meta.models?`<span class="ed-chip">${esc(modelShort(meta.models))}</span>`:''}${meta.grade?`<span class="ed-chip g-${esc(meta.grade)}" style="border-color:currentColor">${esc(meta.grade)}</span>`:''}<span class="ed-chip" style="color:var(--green);border-color:rgba(125,216,125,.4)">grounded in the transcript</span></div></div>`:"";
+    const bodyHtml=`<div class="ed-body">${rows.map(renderTurn).join("")}</div>`;
+    return `<div class="ed-group${collapsed?' ed-collapsed':''}" data-thread="${esc(g.thread||g.key)}" data-key="${esc(g.key)}">${divider}${sumCard}${bodyHtml}</div>`;
+  }).join("");
+  const banner=q?`<div class="ap-find">found <b>${matches}</b> turn${matches===1?"":"s"} matching “${esc(q)}” · <span class="bf-btn" onclick="$('#ap-q').value='';apSearch()">clear</span></div>`:"";
+  $("#ap-list").innerHTML=banner+((q&&!matches)?'<div class="empty">no turns match — try another term</div>':'<div class="ap-tl">'+html+'</div>');
+  const mm=$("#ed-minimap");
+  if(mm&&mm.dataset.k!==(EDIT_LOADED||"")){mm.dataset.k=EDIT_LOADED||"";mm.innerHTML=EDIT_GROUPS.map(g=>{
+    if(g.sep)return g.sep.is_wall?'<div class="mm-wall" title="compaction wall"></div>':'';
+    const m2=g.thread?(EDIT_THREADS[g.thread]||{}):{};
+    const col=m2.grade?({A:"var(--green)",B:"var(--cyan)",C:"var(--phos)",D:"var(--ember)"}[m2.grade]):"var(--line)";
+    return `<div class="mm-seg" style="background:${col}" title="${esc(m2.title||g.key)}" onclick="edScrollTo('${esc(g.key)}')"></div>`;
+  }).join("");}
+}
+function edScrollTo(key){const g=document.querySelector('.ed-group[data-key="'+key+'"]');if(g)g.scrollIntoView({behavior:"smooth",block:"start"});}
+function edDensity(){const l=$("#ap-list");if(!l)return;const c=l.classList.toggle("ed-comfortable");const b=$("#ed-dense");if(b)b.textContent=c?"⊟ Compact":"⊡ Comfortable";}
+function edToggle(key){
+  if(EDIT_COLLAPSED.has(key))EDIT_COLLAPSED.delete(key);else EDIT_COLLAPSED.add(key);
+  const grp=document.querySelector('.ed-group[data-key="'+key+'"]');if(!grp)return;
+  const col=grp.classList.toggle("ed-collapsed");
+  const tw=grp.querySelector(".ed-tw");if(tw)tw.textContent=col?"▸":"▾";
+}
+function edFoldAll(){EDIT_GROUPS.forEach(g=>{if(g.key)EDIT_COLLAPSED.add(g.key)});renderEditor();}
+function edUnfoldAll(){EDIT_COLLAPSED.clear();renderEditor();}
+function edFocusThread(key){
+  const g=EDIT_GROUPS.find(x=>x.key===key);if(!g)return;
+  g.rows.forEach(r=>{AP_FOCUS.add(r.uuid);(r.tool_ids||[]).forEach(t=>(AP_TOOLMAP[t]||[]).forEach(u=>AP_FOCUS.add(u)));});
+  renderEditor();apMeter();
+}
+function apExpand(btn,i){
+  const card=btn.closest(".ap-card"),prev=card.querySelector(".ap-prev"),r=AP_ROWS[i];
+  const open=card.classList.toggle("ap-exp-open");
+  prev.textContent=open?(r.full||r.preview):r.preview;
+  btn.textContent=open?"collapse":"expand";
+}
+function apSync(uuid){
+  const node=document.querySelector('.ap-node[data-uuid="'+uuid+'"]');if(!node)return;
+  const on=AP_FOCUS.has(uuid);
+  node.classList.toggle("ap-on",on);
+  const c=node.querySelector(".ap-card");if(c)c.classList.toggle("ap-on",on);
+  const cb=node.querySelector('input[type=checkbox]');if(cb)cb.checked=on;
+}
+function edSyncThreadCount(uuid){
+  const r=AP_ROWS.find(x=>x.uuid===uuid);const g=EDIT_GROUPS.find(x=>x.rows&&x.rows.includes(r));if(!g)return;
+  const grp=document.querySelector('.ed-group[data-key="'+g.key+'"]');if(!grp)return;
+  const n=g.rows.filter(x=>AP_FOCUS.has(x.uuid)).length;
+  const el=grp.querySelector(".ed-foc-n");if(el)el.textContent=n?n+' in focus':'';
+}
+function apToggle(uuid,on){
+  const affected=new Set([uuid]);
+  if(on){AP_FOCUS.add(uuid);
+    const r=AP_ROWS.find(x=>x.uuid===uuid);
+    ((r&&r.tool_ids)||[]).forEach(t=>(AP_TOOLMAP[t]||[]).forEach(u=>{AP_FOCUS.add(u);affected.add(u)}));
+  }else AP_FOCUS.delete(uuid);
+  affected.forEach(u=>{apSync(u);edSyncThreadCount(u);});apMeter();
+}
+function apClear(){AP_FOCUS=new Set();renderEditor();apMeter();$("#ap-report").innerHTML="";}
+function apMeter(){
+  let tok=0;AP_ROWS.forEach(r=>{if(AP_FOCUS.has(r.uuid))tok+=r.tokens});
+  const total=AP_ROWS.reduce((s,r)=>s+r.tokens,0);
+  if($("#ap-foc-tok"))$("#ap-foc-tok").textContent=`~${fmt(tok)} tok`;
+  if($("#ap-foc-n"))$("#ap-foc-n").textContent=AP_FOCUS.size;edStat();
+  if($("#ap-mask"))$("#ap-mask").textContent=`· masks ~${fmt(Math.max(0,total-tok))} tok into the vault`;
+  const bar=$("#ap-meter-bar");if(bar)bar.style.width=Math.round(100*tok/Math.max(total,1))+"%";
+  if($("#ap-meter")&&EDIT_MODE==="aperture")$("#ap-meter").textContent=AP_FOCUS.size?`${AP_FOCUS.size} turns in focus · ~${fmt(tok)} tok`:"";
+}
+function surgToggle(threadId,on){
+  if(on)SURG_DROPS.add(threadId);else SURG_DROPS.delete(threadId);
+  document.querySelectorAll('.ed-group[data-thread="'+threadId+'"] .ed-thread').forEach(th=>th.classList.toggle("ed-drop",on));
+  surgMeter();
+}
+function surgClear(){SURG_DROPS=new Set();renderEditor();surgMeter();$("#surg-report").innerHTML="";$("#surg-apply").style.display="none";}
+function surgMeter(){
+  let tok=0;AP_ROWS.forEach(r=>{if(r.thread&&SURG_DROPS.has(r.thread))tok+=r.tokens});
+  if($("#surg-tok"))$("#surg-tok").textContent=`~${fmt(tok)} tok`;
+  if($("#surg-n"))$("#surg-n").textContent=SURG_DROPS.size;edStat();
+  if($("#ap-meter")&&EDIT_MODE==="surgery")$("#ap-meter").textContent=SURG_DROPS.size?`${SURG_DROPS.size} threads marked · ~${fmt(tok)} tok`:"";
+}
+async function applyCurate(){
+  const session=$("#ap-session").value;
+  if(!AP_FOCUS.size){$("#ap-report").innerHTML='<span class="warnbox" style="margin:0">tick at least one turn to keep in focus</span>';return}
+  if(!await confirmModal(`Author a manual compaction wall on this session?\n\n${AP_FOCUS.size} turns stay in focus; the rest are sealed into the vault (a new sacred version) and masked from the model. Nothing is deleted — same session, resume after.`))return;
+  $("#ap-report").innerHTML='<span class="loading" style="padding:0">sealing vault version → appending wall…</span>';
+  const r=await fetch("/api/curate/apply",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session,confirm:true,focus:[...AP_FOCUS],summary:$("#ap-summary").value})}).then(x=>x.json());
+  if(r.error){$("#ap-report").innerHTML=`<span class="warnbox" style="margin:0">${esc(r.error)}</span>`;return}
+  $("#ap-report").innerHTML=`<span style="color:var(--green)">✓ wall authored — ${r.focus_count} turns in focus (~${fmt(r.post_tokens)} tok); pre-curation state sealed as <b>v${r.version}</b>.</span>
+    <div style="margin-top:6px">resume the SAME session: <code style="background:var(--ink3);padding:4px 8px;border-radius:4px;user-select:all">${esc(r.resume)}</code></div>
+    <div class="hint" style="margin-top:5px">/exit in Claude Code, run that, and the model loads only your focus turns + summary. Every masked turn stays in the vault.</div>`;
 }
 function shortModel(models){
   const m=(models||"").split(",")[0];
@@ -1193,6 +1833,14 @@ async function saveSettings(){
     body:JSON.stringify(body)}).then(x=>x.json());
   if(r.error)alert(r.error);else loadSettings();
 }
+async function saveVault(){
+  const vault=$("#set-vault").value.trim();if(!vault)return;
+  const r=await fetch("/api/setup",{method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({vault})}).then(x=>x.json());
+  if(r.error)alert(r.error);
+  else{alert("vault set to "+r.vault+"\nrestart fable for prune/compaction to write here.");loadSettings();}
+}
 async function saveAutoPrune(){
   const r=await fetch("/api/settings",{method:"POST",
     headers:{"Content-Type":"application/json"},
@@ -1246,37 +1894,68 @@ async function stopBackfill(){
     headers:{"Content-Type":"application/json"},body:"{}"});
   toast("backfill stopping…");pollBackfill();
 }
+async function pauseBackfill(){
+  await fetch("/api/cards/pause",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:"{}"});
+  toast("backfill pausing — queue kept");pollBackfill();
+}
+async function resumeBackfill(){
+  await fetch("/api/cards/resume",{method:"POST",
+    headers:{"Content-Type":"application/json"},body:"{}"});
+  toast("backfill resuming…");pollBackfill();
+}
 async function dequeueJob(i){
   await fetch("/api/cards/dequeue",{method:"POST",
     headers:{"Content-Type":"application/json"},body:JSON.stringify({index:i})});
   toast("removed from queue");pollBackfill();
 }
+const _ctl=(id,act,sym,col,title)=>`<span class="bf-btn" style="color:${col}" title="${title}" onclick="event.stopPropagation();jobAct(${id},'${act}')">${sym}</span>`;
+function bfJobRow(j){
+  const pct=j.total?Math.round(100*(j.done||0)/j.total):0, st=j.status;
+  const dot={running:'<span style="color:var(--phos)">●</span>',queued:'<span style="color:var(--faint)">○</span>',paused:'<span style="color:var(--phos)">⏸</span>',done:'<span style="color:var(--green)">✓</span>',stopped:'<span style="color:var(--ember)">■</span>',error:'<span style="color:var(--ember)">✗</span>'}[st]||'○';
+  let c="";
+  if(st==="running")c=_ctl(j.id,"pause","⏸","var(--phos)","pause — frees a slot for the next job")+_ctl(j.id,"stop","■","var(--ember)","stop this job")+_ctl(j.id,"cancel","✕","var(--faint)","cancel & remove");
+  else if(st==="queued")c='<span class="hint" style="font-size:9px">queued</span>'+_ctl(j.id,"pause","⏸","var(--phos)","hold")+_ctl(j.id,"cancel","✕","var(--faint)","remove");
+  else if(st==="paused")c=_ctl(j.id,"resume","▶","var(--green)","resume")+_ctl(j.id,"cancel","✕","var(--faint)","remove");
+  else if(st==="done")c='<span class="hint" style="font-size:9px;color:var(--green)">done</span>'+_ctl(j.id,"cancel","✕","var(--faint)","dismiss");
+  else c=_ctl(j.id,"resume","▶","var(--green)","re-run")+_ctl(j.id,"cancel","✕","var(--faint)","dismiss");
+  return `<div class="bf-job">
+    <div class="bf-jobhead">${dot} <span class="bf-joblabel" title="${esc(j.label)} · ${esc(j.provider||"")}">${esc(j.label)}</span>${j.rate_limited?'<span class="rl-badge" title="provider rate-limited / quota exhausted — paused, resume when it resets">⏳ rate-limited</span>':''} <span class="bf-jobctl">${c}</span></div>
+    ${(st==="running"||st==="paused")?`<div class="bf-bar" style="margin:3px 0"><i style="width:${pct}%"></i></div><div class="bf-meta" style="padding:0">${j.done||0}/${j.total} (${pct}%) · ${j.generated||0} ok${j.failed?` · <span style="color:var(--ember)">${j.failed} fail</span>`:""}</div>`:""}
+    ${j.error?`<div class="bf-meta" style="padding:0;color:var(--ember)">${esc((j.error||"").slice(0,70))}</div>`:""}</div>`;
+}
+function jobAct(id,action){
+  toast({pause:"⏸ pausing job",resume:"▶ resuming job",stop:"■ stopping job",cancel:"✕ cancelling job"}[action]||action);
+  fetch("/api/cards/job",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({id,action})}).then(()=>pollBackfill()).catch(()=>{});
+}
 async function pollBackfill(){
   clearTimeout(bfTimer);
   const s=await api("/api/backfill");
-  const pct=s.total?Math.round(100*(s.done||0)/s.total):0;
-  const eta=s.eta_seconds!=null?(s.eta_seconds>5400
-    ?Math.round(s.eta_seconds/3600)+"h":Math.round(s.eta_seconds/60)+"m"):"…";
-  const scope=s.session?("session "+(s.session||"").slice(0,8))
-    :(s.project||"all projects");
-  const q=s.queue||[];
-  // stop is ALWAYS available while running/queued — works cross-process via
-  // the DB stop flag, no matter who started the run (sidebar, CLI, worker)
-  const stopBtn='<span class="bf-btn" onclick="stopBackfill()" style="color:var(--ember)">■ stop</span>';
-  const qhtml=q.length?`<div class="bf-meta" style="padding:2px 0 0;color:var(--dim)">⋯ queued: ${q.map((j,i)=>`${esc(j.label||"job")} (${j.candidates||0})<span class="bf-btn" title="remove from queue" onclick="dequeueJob(${i})">✕</span>`).join(" · ")}</div>`:"";
-  const bar=s.running
-    ?`<div class="bf-bar" style="margin:3px 0"><i style="width:${pct}%"></i></div>
-      <div class="bf-meta" style="padding:0">✦ ${esc(scope)}${s.external?" (background)":""} · ${s.done||0}/${s.total} (${pct}%)
-      · ${s.generated||0} ok · ${s.failed||0} fail · ~${eta} ${stopBtn}</div>${qhtml}`
-    :(q.length
-      ?`<div class="bf-meta" style="padding:0;color:var(--dim)">✦ ${q.length} job(s) queued — starting… ${stopBtn}</div>${qhtml}`
-      :(s.finished?`<div class="bf-meta" style="padding:0;color:${s.error?"var(--ember)":"var(--green)"}">✦ last run: ${s.generated||0} cards${s.failed?", "+s.failed+" failed":""}${s.error?" — "+esc((s.error||"").slice(0,90)):""}</div>`:""));
-  const g=$("#bf-global");if(g)g.innerHTML=bar;
+  const jobs=s.jobs||[];
+  const head=jobs.length?`<div class="bf-meta" style="padding:0 0 4px;color:var(--dim);display:flex;align-items:center;gap:6px">✦ <b style="color:var(--phos)">${s.running_count}/${s.max_parallel}</b> running${s.queued_count?` · ${s.queued_count} waiting`:""}<span class="bf-btn" style="color:var(--ember);margin-left:auto" onclick="stopBackfill()">■ stop all</span></div>`:"";
+  const g=$("#bf-global");if(g)g.innerHTML=jobs.length?head+jobs.map(bfJobRow).join(""):"";
+  const bb=$("#bb-backfill");
+  const rl=jobs.some(j=>j.rate_limited);
+  const lv=(s.live||{}).status||"idle";
+  const cd=$("#bb-carddot");
+  if(cd){const on=(lv==="carding"||lv==="active");cd.style.color=on?"var(--green)":(lv==="rate-limited"||lv==="error")?"var(--ember)":"var(--faint)";cd.style.animation=on?"flGlow 2s ease-in-out infinite":"none";cd.title="live carding (independent worker) · "+lv;}
+  if(bb){
+    const runBtn='<span class="bb-ctl" style="color:var(--green)" onclick="startBackfill(null,null)" title="card all uncarded threads across all projects (uses the Backfill engine provider/model in the sidebar)">▶ run</span>';
+    bb.innerHTML = s.running_count
+      ? `<span style="color:var(--phos)">✦ ${s.running_count}/${s.max_parallel}</span> running${s.queued_count?` · ${s.queued_count} queued`:""} · ${s.generated||0} ok <span class="bb-ctl" style="color:var(--phos)" onclick="pauseBackfill()" title="pause all">⏸</span><span class="bb-ctl" style="color:var(--ember)" onclick="stopBackfill()" title="stop all">■</span>`
+      : rl
+      ? `<span style="color:var(--ember)">✦ paused · rate-limited</span> <span class="bb-ctl" style="color:var(--green)" onclick="resumeBackfill()" title="resume (once the quota resets)">▶</span><span class="bb-ctl" style="color:var(--ember)" onclick="stopBackfill()" title="clear">■</span>`
+      : s.queued_count
+      ? `<span style="color:var(--phos)">✦ ${s.queued_count} queued/paused</span> <span class="bb-ctl" style="color:var(--green)" onclick="resumeBackfill()" title="resume">▶</span><span class="bb-ctl" style="color:var(--ember)" onclick="stopBackfill()" title="clear">■</span>`
+      : `<span style="color:var(--dim)">✦ cards</span> ${runBtn}`;
+  }
   document.querySelectorAll(".proj").forEach(el=>{
     const slot=el.querySelector(".bf-slot");if(!slot)return;
-    slot.innerHTML=(s.running&&s.project&&el.dataset.project===s.project)?bar:"";
+    const pj=jobs.filter(j=>["running","queued","paused"].includes(j.status)&&j.project===el.dataset.project);
+    slot.innerHTML=pj.length?pj.map(bfJobRow).join(""):"";
   });
-  bfTimer=setTimeout(pollBackfill,(s.running||q.length)?4000:15000);
+  bfTimer=setTimeout(pollBackfill,(s.running_count||s.queued_count)?3000:15000);
 }
 pollBackfill();
 function renderList(jsonText){
@@ -1293,14 +1972,17 @@ function colorize(text){
 }
 
 /* ── cards tab ── */
-async function loadCards(){
+async function loadCards(session){
   const view=$("#view-cards");
-  const cards=await api("/api/cards");
-  view.innerHTML=cards.length?`<div class="results">${cards.map(c=>hitHtml({
+  let cards=await api("/api/cards");
+  if(session)cards=cards.filter(c=>c.session_id===session);
+  const hdr=session?`<div class="hint" style="margin-bottom:10px">▦ cards in <b>${esc(SESSION_TITLES[session]||session.slice(0,10)+'…')}</b> · ${cards.length} · <span class="bf-btn" onclick="loadCards()">show all cards</span></div>`:"";
+  view.innerHTML=cards.length?hdr+`<div class="results">${cards.map(c=>hitHtml({
     prompt_id:c.prompt_id,title:c.title,type:c.type,outcome:c.outcome,
     turn_count:c.turn_count,est_tokens:c.est_tokens,first_ts:c.first_ts,
-    sidechain_turns:c.sidechain_turns,models:c.models,project:c.project
-  })).join("")}</div>`:'<div class="empty"><span class="big">no cards yet</span>add OPENROUTER_API_KEY to .env and run: fable cards run — or hit ✦ cards next to a project in the sidebar</div>';
+    sidechain_turns:c.sidechain_turns,models:c.models,project:c.project,
+    grade:c.grade,gen_attempts:c.gen_attempts,gen_fails:c.gen_fails
+  })).join("")}</div>`:(session?hdr+'<div class="empty">no cards for this session yet — the live-carding worker will fill them in</div>':'<div class="empty"><span class="big">no cards yet</span>add OPENROUTER_API_KEY to .env and run: fable cards run — or hit ✦ cards next to a project in the sidebar</div>');
 }
 
 /* ── Dashboard tab: full usage + cost telemetry ── */
@@ -1512,12 +2194,13 @@ function drawProj(byProject,active){
 }
 
 /* ── file time-travel ── */
-let FT_PATH=null,FT_VERS=[];
+let FT_PATH=null,FT_VERS=[],FT_FILES=[],FT_A=0,FT_B=0;
 async function ftSession(sid){
   $("#ft-out").innerHTML='<div class="loading">finding every file this session touched…</div>';
   const files=await api("/api/sessionfiles",{session:sid});
   if(files.error||!files.length){
     $("#ft-out").innerHTML='<div class="empty"><span class="big">no file edits in this transcript</span>conversation-only session — search a path above for the global archive</div>';return}
+  FT_FILES=files;
   const mx=Math.max(...files.map(f=>f.total),1);
   $("#ft-out").innerHTML=`<div class="hint" style="margin-bottom:10px">files edited in <b style="color:var(--phos)">${sid.slice(0,8)}</b> — click a card for the version diff viewer</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:10px">`+
@@ -1554,7 +2237,7 @@ function ftSpark(vers){
   return `<svg width="${W}" height="${H}" style="vertical-align:middle"><path d="${d}" fill="none" stroke="var(--phos)" stroke-width="1.5"/></svg>`;
 }
 async function ftHist(path){
-  FT_PATH=path;
+  FT_PATH=path;renderCrumb();
   $("#ft-out").innerHTML='<div class="loading">replaying every edit…</div>';
   const h=await api("/api/filehist",{path});
   if(h.error){$("#ft-out").innerHTML=`<div class="warnbox">${esc(h.error)}</div>`;return}
@@ -1564,7 +2247,10 @@ async function ftHist(path){
   const sess=new Set(FT_VERS.map(v=>v.session_id)),writes=FT_VERS.filter(v=>v.tool==="Write").length;
   let churn=0;for(let i=1;i<FT_VERS.length;i++){const a=FT_VERS[i-1].bytes,b=FT_VERS[i].bytes;if(a!=null&&b!=null)churn+=Math.abs(b-a)}
   const span=`${(FT_VERS[0].ts||"?").slice(0,10)} → ${(FT_VERS[FT_VERS.length-1].ts||"?").slice(0,10)}`;
-  const opts=FT_VERS.map((v,i)=>`<option value="${i}" ${v.ok?"":"disabled"}>v${i}${v.ok?(v.derived?" ◐":""):" ○"} · ${(v.ts||"?").slice(5,16)} · ${v.tool}</option>`).join("");
+  const recon=FT_VERS.map((v,i)=>v.ok?i:-1).filter(i=>i>=0);
+  const defB=recon.length?recon[recon.length-1]:Math.max(0,FT_VERS.length-1);
+  const defA=recon.length>1?recon[recon.length-2]:defB;   // predecessor → latest (consecutive)
+  FT_A=defA;FT_B=defB;
   $("#ft-out").innerHTML=`
     <div class="genwrap" style="margin-bottom:12px">
       <button class="ghost" style="float:right" onclick="ftBack()">← files</button>
@@ -1576,23 +2262,59 @@ async function ftHist(path){
         <span>churn <b style="color:var(--phos)">${fmt(churn)}B</b></span>
         <span>${span}</span>
         <span title="file size across versions">${ftSpark(FT_VERS)}</span>
+        <button id="ft-bt-d" class="ghost" style="margin-left:auto" onclick="ftDiff()">unified diff</button>
+        <span class="hint">● exact · ◐ rebuilt · ○ unrecon</span>
       </div>
-      <div style="display:flex;gap:10px;margin-top:10px;align-items:center;flex-wrap:wrap">
-        <select id="ft-a" class="facet" style="width:auto">${opts}</select> ⇄
-        <select id="ft-b" class="facet" style="width:auto">${opts}</select>
-        <button id="ft-bt-p" onclick="ftPanes()">side by side</button>
-        <button id="ft-bt-d" class="ghost" onclick="ftDiff()">unified diff</button>
-      </div>
+      <div class="ft-railwrap"><span class="ft-raillabel">TIME-TRAVEL</span><div id="ft-rail">${ftRailInner(defA,defB)}</div></div>
     </div>
-    <div id="ft-panes"></div>
-    <div class="results" style="margin-top:12px">`+FT_VERS.map((v,i)=>`
-      <div class="hit" style="padding:8px 14px">
-        <span style="color:${v.ok?(v.derived?"var(--cyan)":"var(--green)"):"var(--ember)"}">v${i} ${v.ok?(v.derived?"◐":"●"):"○"}</span>
-        <span style="color:var(--dim);font-size:11.5px"> ${(v.ts||"?").slice(0,19)} · ${v.tool} · ${v.bytes!=null?fmt(v.bytes)+"B":"—"} · session ${(v.session_id||"?").slice(0,8)}${v.note?" · "+esc(v.note):""}</span>
-        <span class="bf-btn" style="float:right" onclick="event.stopPropagation();openThread('${esc(v.prompt_id)}')" title="open the conversation that made this edit">↪ thread</span>
-      </div>`).join("")+"</div>";
-  const last=FT_VERS.map((v,i)=>v.ok?i:-1).filter(i=>i>=0);
-  if(last.length){$("#ft-a").value=String(last[0]);$("#ft-b").value=String(last[last.length-1])}
+    <div class="ft-diff-wrap">
+      <div class="ft-side"><div class="hint" style="margin:0 0 6px 4px">${FT_FILES.length?"files in scope":""}</div>${ftSidebar()}</div>
+      <div class="ft-main"><div id="ft-panes"></div></div>
+    </div>`;
+  ftPanes();
+}
+function ftRailInner(a,b){
+  const n=FT_VERS.length;
+  if(n<2)return `<div class="ft-track"></div>`;
+  const pos=i=>i/(n-1)*100;
+  const lo=Math.min(a,b),hi=Math.max(a,b);
+  // only writes (full rewrites) + the two endpoints get a tick — keeps it clean
+  const ticks=FT_VERS.map((v,i)=>{
+    if(v.tool!=="Write"&&i!==a&&i!==b)return "";
+    const col=v.ok?(v.derived?"var(--cyan)":"var(--green)"):"var(--ember)";
+    return `<span class="ft-tick" style="left:${pos(i).toFixed(2)}%;background:${col}" title="v${i} · ${v.tool}"></span>`;
+  }).join("");
+  return `<div class="ft-track" onclick="ftTrackClick(event)" title="click the track to move the nearest endpoint">
+    <div class="ft-fill" style="left:${pos(lo).toFixed(2)}%;width:${(pos(hi)-pos(lo)).toFixed(2)}%"></div>
+    ${ticks}
+    <span class="ft-handle" style="left:${pos(a).toFixed(2)}%"><span class="ft-hlabel">before v${a}</span></span>
+    <span class="ft-handle after" style="left:${pos(b).toFixed(2)}%"><span class="ft-hlabel">after v${b}</span></span>
+  </div>`;
+}
+function ftTrackClick(e){
+  const r=e.currentTarget.getBoundingClientRect();
+  const frac=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
+  let i=Math.round(frac*(FT_VERS.length-1));
+  if(!FT_VERS[i]||!FT_VERS[i].ok){            // snap to the nearest reconstructable
+    let best=-1,bd=1e9;
+    FT_VERS.forEach((v,j)=>{if(v.ok&&Math.abs(j-i)<bd){bd=Math.abs(j-i);best=j}});
+    if(best<0)return;i=best;
+  }
+  ftPick(i);
+}
+function ftPick(i){
+  if(!FT_VERS[i]||!FT_VERS[i].ok)return;
+  if(Math.abs(i-FT_A)<=Math.abs(i-FT_B))FT_A=i;else FT_B=i;
+  ftPanes();
+}
+function ftSync(){ftPanes();}
+function ftSidebar(){
+  if(!FT_FILES||!FT_FILES.length)return '<div class="hint" style="padding:4px">— search a path to browse —</div>';
+  return FT_FILES.map(f=>{
+    const name=f.path.split("/").pop();
+    return `<div class="ft-frow${f.path===FT_PATH?" active":""}" onclick="ftHist('${esc(f.path)}')" title="${esc(f.path)}">
+      <span class="ft-fname">${esc(name)}</span><span class="ft-fct">${f.total!=null?f.total:(f.mentions||"")}</span></div>`;
+  }).join("");
 }
 function ftBack(){
   if(SEL.session)ftSession(SEL.session);
@@ -1605,11 +2327,12 @@ function ftBtn(active){
   d.classList.toggle("ghost",active!=="d");
 }
 async function ftPanes(){
-  const a=$("#ft-a").value,b=$("#ft-b").value;
-  ftBtn("p");
-  $("#ft-panes").innerHTML='<div class="loading">diffing versions…</div>';
+  const a=FT_A,b=FT_B;
+  const rail=$("#ft-rail");if(rail)rail.innerHTML=ftRailInner(a,b);
+  const head=`<div class="ft-panehead">${ftPaneSel("before",a,"ftSelA")}${ftPaneSel("after",b,"ftSelB")}</div>`;
+  $("#ft-panes").innerHTML=`<div class="genwrap" style="padding:0;overflow:hidden">${head}<div class="loading">diffing versions…</div></div>`;
   const r=await api("/api/filediff2",{path:FT_PATH,a,b});
-  if(r.error){$("#ft-panes").innerHTML=`<div class="warnbox">${esc(r.error)}</div>`;return}
+  if(r.error){$("#ft-panes").innerHTML=`<div class="genwrap" style="padding:0;overflow:hidden">${head}<div class="warnbox" style="margin:10px">${esc(r.error)}</div></div>`;return}
   // collapse long unchanged runs so the changes pop
   const rows=[];let eq=[];
   const flush=()=>{if(eq.length>10){rows.push(...eq.slice(0,3),{gap:eq.length-6},...eq.slice(-3))}else rows.push(...eq);eq=[]};
@@ -1622,13 +2345,18 @@ async function ftPanes(){
   const body=rows.map(x=>x.gap
     ?`<tr><td colspan="4" style="text-align:center;color:var(--faint);padding:5px;border-top:1px dashed var(--line);border-bottom:1px dashed var(--line)">··· ${x.gap} unchanged lines ···</td></tr>`
     :`<tr>${cell(x.a,x.al,BG[x.op][0])}${cell(x.b,x.bl,BG[x.op][1])}</tr>`).join("");
-  $("#ft-panes").innerHTML=`<div class="genwrap" style="overflow:auto;max-height:62vh;padding:8px">
-    <div class="hint" style="margin-bottom:6px"><b style="color:var(--red)">red</b> = removed in v${a} → <b style="color:var(--green)">green</b> = added by v${b}</div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px;font-family:var(--mono);table-layout:fixed">${body}</table></div>`;
+  $("#ft-panes").innerHTML=`<div class="genwrap" style="padding:0;overflow:hidden">${head}
+    <div style="overflow:auto;max-height:60vh"><table style="width:100%;border-collapse:collapse;font-size:11px;font-family:var(--mono);table-layout:fixed">${body}</table></div></div>`;
+  const sel=rail&&rail.querySelector(".ft-node.sel");if(sel)sel.scrollIntoView({inline:"center",block:"nearest"});
 }
+function ftPaneSel(label,sel,fn){
+  const o=FT_VERS.map((v,i)=>`<option value="${i}" ${v.ok?"":"disabled"} ${i===sel?"selected":""}>v${i}${v.ok?(v.derived?" ◐":" ●"):" ○"} · ${(v.ts||"?").slice(5,16)} · ${v.tool}</option>`).join("");
+  return `<div class="ft-ph"><span class="hint">${label}</span><select class="facet" style="flex:1;min-width:0" onchange="${fn}(this.value)">${o}</select></div>`;
+}
+function ftSelA(v){FT_A=+v;ftPanes();}
+function ftSelB(v){FT_B=+v;ftPanes();}
 async function ftDiff(){
-  ftBtn("d");
-  const a=$("#ft-a").value,b=$("#ft-b").value;
+  const a=FT_A,b=FT_B;
   const r=await api("/api/filediff",{path:FT_PATH,a,b});
   if(r.error){openModal("diff failed","",`<div class="warnbox" style="margin:0">${esc(r.error)}</div>`);return}
   const body=r.diff.map(l=>{
@@ -1680,6 +2408,23 @@ async function loadSettings(){
       <button class="ghost" onclick="addFact()">remember</button>
     </div>
   </div>
+  <div class="genwrap" style="margin-bottom:18px">
+    <b style="color:var(--phos)">Storage</b>
+    <i class="info" data-tip="Everything fable owns lives under one home directory. Change the vault with 'fable setup --vault /path' or the FABLE_VAULT env var, then restart. Legacy backup folders are read-only sources registered in config.json."></i>
+    ${cfg.storage?`<div style="margin-top:10px;display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-family:var(--mono,monospace);font-size:12px">
+      <span style="color:var(--dim)">home</span><span style="color:var(--text)">${esc(cfg.storage.home)}</span>
+      <span style="color:var(--dim)">db</span><span style="color:var(--text)">${esc(cfg.storage.db)}</span>
+      <span style="color:var(--dim)">vault</span><span style="color:var(--phos)">${esc(cfg.storage.vault)}</span>
+      <span style="color:var(--dim)">checkpoints</span><span style="color:var(--text)">${esc(cfg.storage.checkpoints)}</span>
+      <span style="color:var(--dim)">config</span><span style="color:var(--text)">${esc(cfg.storage.config)}</span>
+      <span style="color:var(--dim)">read-roots</span><span style="color:var(--text)">${(cfg.storage.backup_roots||[]).map(esc).join("<br>")}</span>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+      <input id="set-vault" placeholder="${esc(cfg.storage.vault)}" style="flex:1;background:var(--ink3);border:1px solid var(--line);color:var(--text);padding:7px 10px;border-radius:4px">
+      <button class="ghost" onclick="saveVault()">set vault location</button>
+    </div>
+    <div class="hint" style="margin-top:6px">moves where new prune/surgery/compaction generations are written; existing vault stays a read-root</div>`:''}
+  </div>
   <div class="hint">claude-cli provider needs NO key — it uses your machine's Claude Code login (Max/Pro subscription). env file: ${esc(cfg.env_path)}</div>
   <div style="border:1px solid var(--line);border-radius:6px;padding:14px 16px;margin-top:14px">
     <div style="font:600 14px var(--serif);color:var(--phos);margin-bottom:8px">auto-prune
@@ -1713,6 +2458,33 @@ if(location.hash.length>1)try{
     setTimeout(()=>{$("#g-session").value=h.slice(6);loadGraph(true)},900);
   } else showTab(h);
 }catch(e){}
+else renderCrumb();
 </script>
+<style id="fl-motion">
+/* ── micro-motion layer (native CSS, no deps, offline) · gated on reduced-motion ── */
+@media (prefers-reduced-motion: no-preference){
+  .rail .tab,.bf-btn,button,.crumb a,.sess a,.card,.ap-card,#palette-open,.tree-toggle,.bb-ctl,.ed-divider,.ed-tw{
+    transition:background .16s ease,color .16s ease,border-color .16s ease,
+      transform .12s cubic-bezier(.2,.8,.3,1),box-shadow .16s ease,opacity .16s ease}
+  button:active,.bf-btn:active,.rail .tab:active,.bb-ctl:active{transform:scale(.93)}
+  .rail .tab:hover{transform:translateY(-1px)}
+  .card:hover{transform:translateY(-2px)}
+  /* view crossfade on tab switch */
+  section[id^="view-"]{animation:flView .26s cubic-bezier(.2,.8,.3,1)}
+  @keyframes flView{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  /* bounded lists/cards rise in (spine .ap-node excluded — too many) */
+  .sess a,.card,.res,.ed-divider,.surg-row{animation:flRise .3s cubic-bezier(.2,.8,.3,1) both}
+  @keyframes flRise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  /* active lens icon pop */
+  .rail .tab.active i{animation:flPop .32s cubic-bezier(.2,.8,.3,1)}
+  @keyframes flPop{0%{transform:scale(.7)}60%{transform:scale(1.16)}100%{transform:scale(1)}}
+  /* live status dots breathe */
+  #botbar .dot{animation:flGlow 2.4s ease-in-out infinite}
+  @keyframes flGlow{0%,100%{opacity:.5}50%{opacity:1}}
+  /* toasts / modals spring in */
+  #toast,#palette,.modal,.confirm{animation:flSpring .3s cubic-bezier(.2,1.12,.3,1)}
+  @keyframes flSpring{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
+}
+</style>
 </body>
 </html>

@@ -25,17 +25,13 @@ class TestPreCompactHook(unittest.TestCase):
         shutil.rmtree(self.dir)
 
     def run_hook(self, payload):
-        # patch backup roots to the sandbox via env-free monkey route:
-        # call run_hook directly with DEFAULT_BACKUP_ROOTS pointing nowhere,
-        # so it falls back to <db dir>/backups
+        # isolate the vault to the sandbox so the hook never writes to the
+        # machine's real ~/.fable/vault
         from fable.hook import run_hook
-        import fable.discover as disc
-        old = disc.DEFAULT_BACKUP_ROOTS
-        disc.DEFAULT_BACKUP_ROOTS = ["/nonexistent"]
-        try:
+        from unittest.mock import patch
+        with patch("fable.paths.vault_dir",
+                   return_value=os.path.join(self.dir, "vault")):
             return run_hook(self.dbpath, payload)
-        finally:
-            disc.DEFAULT_BACKUP_ROOTS = old
 
     def test_seals_backup_and_indexes_before_compaction(self):
         result = self.run_hook({

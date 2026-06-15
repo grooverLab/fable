@@ -15,12 +15,10 @@ from fable.extract import fts_extract_fn
 from fable.indexer import index_vault, rebuild_threads
 from fable.terms import index_terms
 
-DEFAULT_PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
-DEFAULT_BACKUP_ROOTS = [
-    os.path.expanduser(
-        "~/Desktop/Trading/01_Algos/00/indipendent_scripts/"
-        "transcript-pruning/backups"),
-]
+DEFAULT_PROJECTS_DIR = os.path.join(
+    os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")),
+    "projects")
+# vault read-roots come from fable.paths.backup_roots() — no hardcoded paths.
 
 
 def project_label(dirname: str) -> str:
@@ -75,8 +73,9 @@ def discover(db_path: str,
              project_filter: Optional[str] = None,
              include_vaults: bool = True,
              progress=None) -> dict:
-    backup_roots = (DEFAULT_BACKUP_ROOTS if backup_roots is None
-                    else backup_roots)
+    if backup_roots is None:
+        from fable.paths import backup_roots as _default_roots
+        backup_roots = _default_roots()
     backup_roots = [r for r in backup_roots if os.path.isdir(r)]
 
     totals = {"sessions": 0, "vault_files": 0, "records_indexed": 0,

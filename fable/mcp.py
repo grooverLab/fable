@@ -17,10 +17,13 @@ TOOLS = [
     {
         "name": "fable_search",
         "description": (
-            "Search the indexed Claude Code transcript archive (all "
-            "projects/sessions). Returns ranked conversation threads with "
-            "thread ids, turn counts, token estimates, card titles, "
-            "decisions and outcomes. Use fable_thread to retrieve one."),
+            "RECALL EARLIER CONVERSATION. Use this WHENEVER you need context "
+            "that may be outside your window — after a compaction, deep in a "
+            "long session, or to recall a past decision / discussion across "
+            "ANY session. PREFER IT over guessing or trusting a compaction "
+            "summary (the summary is lossy; this is the exact archive). "
+            "Returns ranked threads with ids, turn/token counts, card titles, "
+            "decisions and outcomes; then call fable_thread to read one verbatim."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -41,9 +44,11 @@ TOOLS = [
     {
         "name": "fable_thread",
         "description": (
-            "Retrieve one conversation thread (user → assistant → tool "
-            "turns, in order, verbatim text) under a token budget. Bulky "
-            "tool results are elided with block pointers."),
+            "Read one conversation thread VERBATIM (user → assistant → tool "
+            "turns, in order) under a token budget — the exact past turns, not "
+            "a paraphrase. Use after fable_search (or with a known prompt_id) "
+            "to recover precise detail a summary would have lost. Bulky tool "
+            "results are elided with block pointers (fetch via fable_block)."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -56,7 +61,9 @@ TOOLS = [
     },
     {
         "name": "fable_block",
-        "description": "One transcript record by uuid, byte-identical.",
+        "description": ("One transcript record by uuid, byte-identical — the "
+                        "exact original bytes. Use to recover a specific tool "
+                        "result or turn that a summary or thread view elided."),
         "inputSchema": {
             "type": "object",
             "properties": {"uuid": {"type": "string"}},
@@ -145,7 +152,8 @@ def _call_tool(db_path, name, args):
         import os as _os
         from pathlib import Path as _P
         from fable import db as _fdb
-        from fable.discover import DEFAULT_BACKUP_ROOTS, project_label
+        from fable.discover import project_label
+        from fable.paths import vault_dir
         from fable.prune import prune_file
         sid = args["session_id"]
         conn = _fdb.connect(db_path)
@@ -158,8 +166,7 @@ def _call_tool(db_path, name, args):
         live = row[0]
         before = _os.path.getsize(live)
         project = project_label(_os.path.basename(_os.path.dirname(live)))
-        root = next((r for r in DEFAULT_BACKUP_ROOTS if _os.path.isdir(r)),
-                    str(_P(db_path).parent / "backups"))
+        root = vault_dir()
         report = prune_file(live, "resume",
                             backup_dir=_P(root) / project, replace=True,
                             strip_images=bool(args.get("strip_images", True)),
