@@ -116,6 +116,22 @@ CREATE TABLE IF NOT EXISTS cards(
   created_at TEXT
 );
 
+-- thread-level tags emitted by the carder (controlled dimensions + open
+-- semantic families). Mirrors the `terms` table shape; a SECONDARY facet over
+-- FTS, never the primary retrieval edge. One row per (thread, family, value).
+CREATE TABLE IF NOT EXISTS thread_tags(
+  prompt_id TEXT NOT NULL,
+  family TEXT NOT NULL,
+  value TEXT NOT NULL,
+  score REAL NOT NULL DEFAULT 0,
+  source TEXT,
+  model TEXT,
+  created_at TEXT,
+  PRIMARY KEY(prompt_id, family, value)
+);
+CREATE INDEX IF NOT EXISTS idx_thread_tags_fv ON thread_tags(family, value);
+CREATE INDEX IF NOT EXISTS idx_thread_tags_prompt ON thread_tags(prompt_id);
+
 CREATE TABLE IF NOT EXISTS citations(
   from_uuid TEXT NOT NULL,
   ref TEXT NOT NULL,

@@ -231,12 +231,13 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
            sort: str = "relevance", kind: Optional[str] = None,
            model: Optional[str] = None,
            project: Optional[str] = None,
-           session: Optional[str] = None) -> List[dict]:
+           session: Optional[str] = None,
+           tag: Optional[str] = None) -> List[dict]:
     """kind: 'main' | 'subagent' (majority-sidechain threads);
     model/project: substring match; session: exact session scope;
     sort: relevance|turns|tokens|recent."""
     fts_query = _fts_query(query)
-    has_filters = any([operative, target, kind, model, project, session])
+    has_filters = any([operative, target, kind, model, project, session, tag])
     if fts_query is None and not has_filters and sort == "relevance":
         return []
     conn = fdb.connect(db_path)
@@ -262,6 +263,17 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
             sql += ("AND prompt_id IN (SELECT prompt_id FROM terms "
                     "WHERE kind='target' AND term = ?) ")
             args.append(target)
+        if tag:
+            # 'family:value' filters that pair; a bare 'value' matches any family
+            fam, sep, val = tag.partition(":")
+            if sep and val:
+                sql += ("AND prompt_id IN (SELECT prompt_id FROM thread_tags "
+                        "WHERE family = ? AND value = ?) ")
+                args.extend([fam, val])
+            else:
+                sql += ("AND prompt_id IN (SELECT prompt_id FROM thread_tags "
+                        "WHERE value = ?) ")
+                args.append(fam)
         if fts_query is not None:
             # over-fetch so post-filters/sorts still fill the limit
             sql += "GROUP BY prompt_id ORDER BY score DESC LIMIT ?"
@@ -294,11 +306,19 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
                 "FROM threads WHERE prompt_id = ?",
                 (prompt_id,)).fetchone() or (None,) * 7
             card = conn.execute(
-                "SELECT title, type, outcome FROM cards WHERE prompt_id = ?",
-                (prompt_id,)).fetchone() or (None, None, None)
+                "SELECT title, type, outcome, decisions FROM cards "
+                "WHERE prompt_id = ?",
+                (prompt_id,)).fetchone() or (None, None, None, None)
             sess = conn.execute(
                 "SELECT project, title FROM sessions WHERE session_id = ?",
                 (meta[4],)).fetchone() or (None, None)
+            tags = [f"{f}:{v}" for f, v in conn.execute(
+                "SELECT family, value FROM thread_tags WHERE prompt_id = ?"
+                " ORDER BY family", (prompt_id,))]
+            try:
+                decisions = json.loads(card[3]) if card[3] else []
+            except Exception:
+                decisions = []
             turn_count = meta[0] or 0
             sidechain_turns = meta[5] or 0
             agent = ("subagent" if turn_count and
@@ -313,6 +333,8 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
                 "sidechain_turns": sidechain_turns, "agent": agent,
                 "models": meta[6],
                 "title": card[0], "type": card[1], "outcome": card[2],
+                "tags": tags,
+                "decisions": decisions,
             })
 
         if kind in ("main", "subagent"):

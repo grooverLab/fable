@@ -84,7 +84,8 @@ def api_search(db_path, params):
                   limit=int(one("n") or 25),
                   sort=one("sort") or "relevance",
                   kind=one("kind"), model=one("model"),
-                  project=one("project"), session=one("session"))
+                  project=one("project"), session=one("session"),
+                  tag=one("tag"))
 
 
 def api_threads(db_path, params):
@@ -140,10 +141,119 @@ def api_facets(db_path, params):
                        "WHERE 1=1" + scope_sql + ") ")
         op_sql += "GROUP BY term ORDER BY SUM(count) DESC LIMIT 30"
         operatives = [r[0] for r in conn.execute(op_sql, scope_args)]
+        tag_sql = "SELECT family, value FROM thread_tags WHERE 1=1 "
+        if project:
+            tag_sql += ("AND prompt_id IN (SELECT prompt_id FROM threads "
+                        "WHERE 1=1" + scope_sql + ") ")
+        tag_sql += "GROUP BY family, value ORDER BY COUNT(*) DESC LIMIT 60"
+        tags = [f"{f}:{v}" for f, v in conn.execute(tag_sql, scope_args)]
         return {"models": sorted(models), "projects": projects,
-                "operatives": operatives}
+                "operatives": operatives, "tags": tags}
     finally:
         conn.close()
+
+
+def api_tags(db_path, params):
+    """Tag analytics over thread_tags — all LIVE queries, no warehouse:
+    value distribution per family, cross-family co-occurrence (semantic
+    clusters), tag x outcome, and tag x project."""
+    SEM = ("topic", "technology", "pattern", "intent", "context", "entity")
+    conn = fdb.connect(db_path)
+    try:
+        # 1) value distribution per family (top 15 each) — the "tag map"
+        by_family = {}
+        for fam, val, n in conn.execute(
+                "SELECT family, value, COUNT(DISTINCT prompt_id) n "
+                "FROM thread_tags GROUP BY family, value "
+                "ORDER BY family, n DESC"):
+            row = by_family.setdefault(fam, [])
+            if len(row) < 15:
+                row.append({"value": val, "n": n})
+        # 2) cross-family co-occurrence among SEMANTIC families (clusters)
+        ph = ",".join("?" * len(SEM))
+        cooccur = [{"a": a, "b": b, "n": n} for a, b, n in conn.execute(
+            "SELECT a.family||':'||a.value, b.family||':'||b.value, COUNT(*) n "
+            "FROM thread_tags a JOIN thread_tags b "
+            "ON a.prompt_id=b.prompt_id AND a.family<b.family "
+            f"WHERE a.family IN ({ph}) AND b.family IN ({ph}) "
+            "GROUP BY 1,2 HAVING n>=2 ORDER BY n DESC LIMIT 40",
+            list(SEM) + list(SEM))]
+        # 3) tag x outcome — a work tag co-occurring with the outcome tag
+        outc = {}
+        for tag, oc, n in conn.execute(
+                "SELECT t.family||':'||t.value, o.value, COUNT(*) n "
+                "FROM thread_tags t JOIN thread_tags o "
+                "ON o.prompt_id=t.prompt_id AND o.family='outcome' "
+                "WHERE t.family IN ('topic','technology','pattern','activity') "
+                "GROUP BY 1,2"):
+            d = outc.setdefault(tag, {"_total": 0})
+            d[oc] = n
+            d["_total"] += n
+        outcome = sorted(({"tag": k, **v} for k, v in outc.items()),
+                         key=lambda r: -r["_total"])[:20]
+        # 4) tag x project — top topic/technology per project
+        proj = {}
+        for pj, tag, n in conn.execute(
+                "SELECT s.project, t.family||':'||t.value, "
+                "COUNT(DISTINCT t.prompt_id) n FROM thread_tags t "
+                "JOIN threads th ON th.prompt_id=t.prompt_id "
+                "JOIN sessions s ON s.session_id=th.session_id "
+                "WHERE t.family IN ('topic','technology') "
+                "AND s.project IS NOT NULL GROUP BY s.project, 2 "
+                "ORDER BY s.project, n DESC"):
+            row = proj.setdefault(pj, [])
+            if len(row) < 8:
+                row.append({"tag": tag, "n": n})
+        total = conn.execute(
+            "SELECT COUNT(DISTINCT prompt_id) FROM thread_tags").fetchone()[0]
+        return {"tagged_threads": total, "by_family": by_family,
+                "cooccur": cooccur, "outcome": outcome, "by_project": proj}
+    finally:
+        conn.close()
+
+
+def api_tags_proposed(db_path, params):
+    """Invented values (every family except the sacred domain) not yet in the
+    known vocab — the triage queue."""
+    from fable import taxonomy as tax
+    t = tax.load_taxonomy()
+    known = {}
+    for grp in ("controlled", "semantic"):
+        for f, vals in (t.get(grp) or {}).items():
+            known[f] = set(vals or [])
+    bl = {tuple(x) for x in (t.get("blacklist") or [])}
+    conn = fdb.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT family, value, COUNT(DISTINCT prompt_id) n FROM thread_tags"
+            " WHERE family != 'domain' GROUP BY family, value ORDER BY n DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    out = [{"family": f, "value": v, "threads": n} for f, v, n in rows
+           if v not in known.get(f, set()) and (f, v) not in bl]
+    return {"proposed": out[:300], "total": len(out)}
+
+
+def post_tags_promote(db_path, body):
+    from fable import taxonomy as tax
+    fam, val = body["family"], body["value"]
+    tax.promote(fam, val)
+    return {"ok": True, "promoted": f"{fam}:{val}"}
+
+
+def post_tags_blacklist(db_path, body):
+    from fable import taxonomy as tax
+    fam, val = body["family"], body["value"]
+    tax.blacklist_value(fam, val)
+    conn = fdb.connect(db_path)               # drop existing rows immediately
+    try:
+        conn.execute("DELETE FROM thread_tags WHERE family=? AND value=?",
+                     (fam, val))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "blacklisted": f"{fam}:{val}"}
 
 
 def _session_cwd(db_path, session_id):
@@ -350,6 +460,24 @@ def api_graph(db_path, params):
             for pid in members:
                 links.append({"source": pid, "target": nid,
                               "kind": "topic", "weight": 3})
+
+        # ── TAG nodes: carder taxonomy tags, df>=2 (family:value co-occurrence) ──
+        tag_members = {}
+        for fam, val, pid in conn.execute(f"""
+                SELECT family, value, prompt_id FROM thread_tags
+                WHERE prompt_id IN ({ph})""", pids):
+            tag_members.setdefault((fam, val), set()).add(pid)
+        for (fam, val), members in sorted(tag_members.items(),
+                                          key=lambda kv: -len(kv[1]))[:60]:
+            if len(members) < 2:
+                continue
+            nid = f"tag:{fam}:{val}"
+            nodes.append({"id": nid, "group": "tag",
+                          "label": f"{fam}:{val}", "family": fam,
+                          "df": len(members)})
+            for pid in members:
+                links.append({"source": pid, "target": nid,
+                              "kind": "tag", "weight": 3})
 
         # ── wikilinks (first-class when present; top 60 by spread so a
         # tag-happy archive can't bury the graph) ──
@@ -628,6 +756,48 @@ def api_filehist(db_path, params):
         for v in versions]}
 
 
+def api_filestory(db_path, params):
+    """File evolution correlated with the reasoning behind each change: the
+    file's versions grouped by the thread that produced them, each annotated
+    with that thread's card (decision / outcome) and tags — what changed, why."""
+    from fable.filetime import file_events, reconstruct
+    path = (params.get("path") or [""])[0]
+    versions = reconstruct(file_events(db_path, path))
+    groups = []
+    for i, v in enumerate(versions):
+        pid = v.get("prompt_id")
+        if groups and groups[-1]["prompt_id"] == pid:
+            groups[-1]["to"] = i
+            groups[-1]["edits"] += 1
+            groups[-1]["bytes"] = v.get("bytes")
+        else:
+            groups.append({"prompt_id": pid, "from": i, "to": i, "edits": 1,
+                           "ts": v.get("ts"), "bytes": v.get("bytes"),
+                           "tool": v.get("tool"),
+                           "session_id": v.get("session_id")})
+    conn = fdb.connect(db_path)
+    try:
+        for g in groups:
+            pid = g["prompt_id"]
+            if not pid:
+                continue
+            card = conn.execute(
+                "SELECT title, type, outcome, decisions FROM cards "
+                "WHERE prompt_id = ?", (pid,)).fetchone()
+            if card:
+                try:
+                    g["decisions"] = json.loads(card[3] or "[]")
+                except (ValueError, TypeError):
+                    g["decisions"] = []
+                g["title"], g["type"], g["outcome"] = card[0], card[1], card[2]
+                g["tags"] = ["%s:%s" % (f, val) for f, val in conn.execute(
+                    "SELECT family, value FROM thread_tags WHERE prompt_id = ? "
+                    "ORDER BY family", (pid,))]
+    finally:
+        conn.close()
+    return {"path": path, "groups": groups}
+
+
 def api_filediff(db_path, params):
     from fable.filetime import file_events, reconstruct, file_diff
     path = (params.get("path") or [""])[0]
@@ -856,7 +1026,8 @@ def post_cards_run(db_path, body):
     LAST_PROVIDER[0] = provider
     dry = run_cards(db_path, project=project, session=session, dry_run=True)
     if not dry["candidates"]:
-        raise ValueError("no uncarded threads in scope — nothing to do")
+        raise ValueError("no uncarded threads ≥200 tokens in scope — "
+                         "short threads (<200 tok) are skipped by design")
     label = (f"session {session[:8]}" if session
              else (project or "all projects"))
     job = {"project": project, "session": session, "provider": provider,
@@ -935,6 +1106,10 @@ def post_settings(db_path, body):
     if "autoprune_pct" in body:
         meta["autoprune_pct"] = str(max(50, min(95,
                                                 float(body["autoprune_pct"]))))
+    if "recard_mode" in body:
+        meta["recard_mode"] = "1" if body["recard_mode"] else "0"
+    if "externalize_enabled" in body:
+        meta["externalize_enabled"] = "1" if body["externalize_enabled"] else "0"
     if not updates and not meta:
         raise ValueError("nothing to save")
     if updates:
@@ -981,7 +1156,8 @@ def api_settings(db_path, params):
     try:
         cfg = dict(conn.execute(
             "SELECT key, value FROM meta WHERE key IN "
-            "('autoprune_enabled','autoprune_pct')").fetchall())
+            "('autoprune_enabled','autoprune_pct','recard_mode',"
+            "'externalize_enabled')").fetchall())
     finally:
         conn.close()
     from fable import paths
@@ -992,6 +1168,8 @@ def api_settings(db_path, params):
             "env_path": env_path(),
             "autoprune_enabled": cfg.get("autoprune_enabled") == "1",
             "autoprune_pct": float(cfg.get("autoprune_pct") or 80),
+            "recard_mode": cfg.get("recard_mode") == "1",
+            "externalize_enabled": cfg.get("externalize_enabled") != "0",
             "storage": {"home": paths.home(), "db": db_path,
                         "vault": paths.vault_dir(),
                         "checkpoints": paths.checkpoints_dir(),
@@ -1101,6 +1279,8 @@ ROUTES["/api/backfill"] = api_backfill_progress
 ROUTES["/api/settings"] = api_settings
 ROUTES["/api/costs"] = api_costs
 ROUTES["/api/dashboard"] = api_dashboard
+ROUTES["/api/tags"] = api_tags
+ROUTES["/api/tags/proposed"] = api_tags_proposed
 ROUTES["/api/export"] = api_export
 ROUTES["/api/files"] = api_files
 def api_filediff2(db_path, params):
@@ -1142,6 +1322,7 @@ def api_filediff2(db_path, params):
 
 ROUTES["/api/filediff2"] = api_filediff2
 ROUTES["/api/filehist"] = api_filehist
+ROUTES["/api/filestory"] = api_filestory
 ROUTES["/api/filediff"] = api_filediff
 ROUTES["/api/fileversion"] = api_fileversion
 ROUTES["/api/sessionfiles"] = api_sessionfiles
@@ -1325,6 +1506,7 @@ def _run_job(jid):
         stats = _c.run_cards(
             db, project=j["project"], session=j["session"],
             provider=j["provider"], model=j["model"],
+            recard=j.get("recard", False),
             abort_after=4, backoff_schedule=(0,),
             on_state=lambda s: j.update(s),
             should_stop=lambda: j["_pause"] or j["_stop"] or j["_cancel"])
@@ -1366,6 +1548,17 @@ def _run_job(jid):
                 j["error"] = "all cards failed — check the provider (Logs)"
         else:
             j["status"] = "done"
+            if j.get("recard"):
+                global RECARD_DONE
+                RECARD_DONE = {"at": j["finished"], "n": gen}
+                try:                       # auto-flip the switch back off
+                    c = fdb.connect(db)
+                    c.execute("INSERT OR REPLACE INTO meta(key, value) "
+                              "VALUES('recard_mode','0')")
+                    c.commit()
+                    c.close()
+                except Exception:
+                    pass
         _schedule(db)
 
 
@@ -1392,14 +1585,22 @@ def post_cards_run(db_path, body):
     if provider not in PROVIDERS:
         raise ValueError(f"provider must be one of {PROVIDERS}")
     LAST_PROVIDER[0] = provider
-    dry = run_cards(db_path, project=project, session=session, dry_run=True)
+    # an explicit {recard:true} (the "re-card all now" button) always re-cards;
+    # otherwise the Settings switch governs whether a run replaces existing cards
+    recard = bool(body.get("recard")) or _recard_mode(db_path)
+    dry = run_cards(db_path, project=project, session=session,
+                    dry_run=True, recard=recard)
     if not dry["candidates"]:
-        raise ValueError("no uncarded threads in scope — nothing to do")
+        raise ValueError("no uncarded threads ≥200 tokens in scope — "
+                         "short threads (<200 tok) are skipped by design")
     label = (f"session {session[:8]}" if session else (project or "all"))
+    if recard:
+        label = "re-card " + label
     jid = next(_JOB_SEQ)
     _JOBS[jid] = {"id": jid, "_db": db_path, "project": project,
                   "session": session, "provider": provider, "model": model,
                   "label": label, "candidates": dry["candidates"],
+                  "recard": recard,
                   "status": "queued", "done": 0, "total": dry["candidates"],
                   "generated": 0, "failed": 0, "error": None,
                   "started": None, "finished": None,
@@ -1416,6 +1617,19 @@ def post_cards_run(db_path, body):
 LAST_PROVIDER = ["openrouter"]
 LIVE_STATE = {"active": True, "status": "idle", "last_card": None,
               "last_error": None}
+RECARD_DONE = None  # {"at","n"} when a re-card pass finishes — for the UI toast
+
+
+def _recard_mode(db_path) -> bool:
+    """Settings toggle: when on, a backfill run REPLACES existing cards."""
+    try:
+        c = fdb.connect(db_path)
+        row = c.execute(
+            "SELECT value FROM meta WHERE key='recard_mode'").fetchone()
+        c.close()
+        return bool(row and row[0] == "1")
+    except Exception:
+        return False
 
 
 def _live_card_loop(db_path):
@@ -1534,6 +1748,7 @@ def api_backfill_progress(db_path, params):
             "generated": sum(j.get("generated") or 0 for j in jobs),
             "failed": sum(j.get("failed") or 0 for j in jobs),
             "live": dict(LIVE_STATE),
+            "recard_done": RECARD_DONE,
             "queue": [j for j in jobs
                       if j["status"] in ("queued", "paused")]}
 
@@ -1546,6 +1761,8 @@ POST_ROUTES["/api/cards/pause"] = post_cards_pause
 POST_ROUTES["/api/cards/resume"] = post_cards_resume
 POST_ROUTES["/api/cards/dequeue"] = post_cards_dequeue
 POST_ROUTES["/api/cards/job"] = post_cards_job
+POST_ROUTES["/api/tags/promote"] = post_tags_promote
+POST_ROUTES["/api/tags/blacklist"] = post_tags_blacklist
 ROUTES["/api/backfill"] = api_backfill_progress
 
 

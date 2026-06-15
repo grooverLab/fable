@@ -433,6 +433,7 @@ button.danger:hover{background:#ff8557}
         <select id="f-model"><option value="">model: all</option></select>
         <select id="f-project"><option value="">project: all</option></select>
         <select id="f-scope" title="scope results to the sidebar-selected transcript"><option value="">scope: everywhere</option></select>
+        <select id="f-tag" title="filter by a carder taxonomy tag (family:value)"><option value="">tag: all</option></select>
         <i class="info" style="align-self:center" data-tip="Filters work with OR without a query: with one they refine the search; with the search box empty they BROWSE all threads (sorted by your sort choice). agent=subagent shows threads dominated by sidechain (Task-tool) records; model comes from each assistant record's own metadata."></i>
       </div>
       <div class="hint">facets intersect · click a result to page the raw thread back in · PACK copies a budgeted multi-thread context block · empty search + filters = browse mode</div>
@@ -1028,7 +1029,8 @@ function searchParams(){
     target:$("#f-target").value.trim(),sort:$("#f-sort").value,
     kind:$("#f-kind").value,model:$("#f-model").value.trim(),
     project:$("#f-project").value.trim(),
-    session:$("#f-scope").value.trim()};
+    session:$("#f-scope").value.trim(),
+    tag:$("#f-tag").value.trim()};
 }
 api("/api/facets").then(f=>{
   (f.models||[]).forEach(m=>{const o=document.createElement("option");
@@ -1037,10 +1039,12 @@ api("/api/facets").then(f=>{
     o.value=p;o.textContent="project: "+p;$("#f-project").appendChild(o)});
   (f.operatives||[]).forEach(op=>{const o=document.createElement("option");
     o.value=op;$("#op-list").appendChild(o)});
+  (f.tags||[]).forEach(t=>{const o=document.createElement("option");
+    o.value=t;o.textContent="tag: "+t;$("#f-tag").appendChild(o)});
 });
 async function doSearch(){
   const p=searchParams();
-  if(!p.q&&!(p.op||p.target||p.kind||p.model||p.project||p.session))return;
+  if(!p.q&&!(p.op||p.target||p.kind||p.model||p.project||p.session||p.tag))return;
   currentThread=null;showTab("search");
   $("#results").innerHTML='<div class="loading">recalling…</div>';
   const hits=await api("/api/search",searchParams());
@@ -1048,9 +1052,13 @@ async function doSearch(){
   $("#results").innerHTML=hits.length?hits.map(hitHtml).join("")
     :'<div class="empty"><span class="big">nothing surfaced</span>try broader words — FTS is OR-ranked</div>';
 }
-["f-sort","f-kind","f-model","f-project","f-scope"].forEach(id=>
+["f-sort","f-kind","f-model","f-project","f-scope","f-tag"].forEach(id=>
   $("#"+id).addEventListener("change",doSearch));
 $("#f-op").addEventListener("change",doSearch);
+function tagSearch(t){const s=$("#f-tag");
+  if(![...s.options].some(o=>o.value===t)){const o=document.createElement("option");
+    o.value=t;o.textContent="tag: "+t;s.appendChild(o);}
+  s.value=t;showTab("search");doSearch();}
 $("#pack").onclick=async()=>{
   const q=$("#q").value.trim();if(!q)return;
   $("#pack").textContent="packing…";
@@ -1077,6 +1085,8 @@ function hitHtml(h){
       ${h.matches!=null?`<span>${h.matches} matching records</span>`:""}
       <span>${esc((h.first_ts||"").slice(0,10))}</span>
     </div>
+    ${(h.tags&&h.tags.length)?`<div class="row2" style="margin-top:4px">${h.tags.slice(0,8).map(t=>`<span class="badge" style="cursor:pointer" title="filter by ${esc(t)}" onclick="event.stopPropagation();tagSearch('${esc(t)}')">${esc(t)}</span>`).join("")}</div>`:""}
+    ${(h.decisions&&h.decisions.length)?h.decisions.slice(0,3).map(d=>`<div class="summary" style="opacity:.85">⚖ ${esc(d)}</div>`).join(""):""}
     ${h.outcome?`<div class="summary">↳ ${esc(h.outcome)}</div>`:""}
     <span class="bf-btn" style="position:absolute;right:14px;bottom:10px" title="weave this thread into the Compose loom" onclick="event.stopPropagation();addToBasket('${esc(h.prompt_id)}','${esc((h.title||h.prompt_id.slice(0,8)).replace(/'/g,""))}',${h.est_tokens||0},'${esc(h.type||"")}','${esc(h.project||"")}')">⊞</span>
   </div>`;
@@ -1230,18 +1240,18 @@ async function loadGraph(force){
 $("#g-reload")&&($("#g-reload").onclick=()=>loadGraph(true));
 document.addEventListener("change",e=>{if(e.target.id==="g-session")loadGraph(true)});
 let GRAPH_DATA=null;
-const GRAPH_ON={file:true,topic:true,wikilink:true,semantic:true,citation:true};
-const GCOLOR={thread:"#ffb454",file:"#6cc7d9",topic:"#7dd87d",wikilink:"#b48ce0"};
+const GRAPH_ON={file:true,topic:true,wikilink:true,semantic:true,citation:true,tag:true};
+const GCOLOR={thread:"#ffb454",file:"#6cc7d9",topic:"#7dd87d",wikilink:"#b48ce0",tag:"#e0719c"};
 function ensureGraphToggles(){
   if($("#g-toggles"))return;
   const bar=document.createElement("div");
   bar.id="g-toggles";
   bar.style.cssText="display:flex;gap:14px;align-items:center;margin:6px 0 8px;font-size:11px;color:var(--dim)";
-  bar.innerHTML=["file","topic","wikilink","semantic","citation"].map(k=>
+  bar.innerHTML=["file","topic","wikilink","semantic","citation","tag"].map(k=>
     `<label style="cursor:pointer;display:flex;align-items:center;gap:4px">
        <input type="checkbox" checked data-gt="${k}">
        <span style="color:${GCOLOR[k]||"var(--ember)"}">${k==="semantic"?"~ semantic":k==="citation"?"→ citation":"● "+k}</span></label>`).join("")
-    +`<span style="margin-left:auto">click: thread opens · file → time-travel · topic → search</span>`;
+    +`<span style="margin-left:auto">click: thread opens · file → time-travel · topic/tag → search</span>`;
   const svg=document.getElementById("graphsvg");
   svg.parentNode.insertBefore(bar,svg);
   bar.addEventListener("change",e=>{
@@ -1315,6 +1325,7 @@ function drawGraph(raw){
         const q=d.full||d.path||d.label;
         setTimeout(()=>{$("#ft-q").value=q;ftHist(q)},150);
       }
+      else if(d.group==="tag")tagSearch(d.label);
       else{$("#q").value=d.label;showTab("search");doSearch();}
     })
     .call(d3.drag()
@@ -1611,7 +1622,7 @@ function renderEditor(){
     const divider=`<div class="ed-divider${dropped?' ed-drop':''}">
       <span class="ed-tw" onclick="edToggle('${esc(g.key)}')">${collapsed?'▸':'▾'}</span>
       ${cbox}
-      <div style="flex:1;min-width:0"><div>${meta.grade?`<span class="grade-sm g-${esc(meta.grade)}" title="generation grade (card health)">${esc(meta.grade)}</span> `:''}<b>${esc(title)}</b> <span class="hint">· ${meta.models?modelBadge(meta.models)+' ':''}${g.rows.length} turns · ~${fmt(tok)} tok</span></div>${reason}</div>
+      <div style="flex:1;min-width:0"><div>${meta.grade?`<span class="grade-sm g-${esc(meta.grade)}" title="generation grade (card health)">${esc(meta.grade)}</span> `:(tok!=null&&tok<200?`<span class="grade-sm" style="opacity:.45;border-color:var(--line);color:var(--dim)" title="too short to card (under 200 tokens) — skipped by design, not pending">·</span> `:'')}<b>${esc(title)}</b> <span class="hint">· ${meta.models?modelBadge(meta.models)+' ':''}${g.rows.length} turns · ~${fmt(tok)} tok</span></div>${reason}</div>
       ${focInfo}
     </div>`;
     const sumCard=(meta.summary&&!collapsed)?`<div class="ed-sumcard"><div class="ed-sumtext">${esc(meta.summary)}</div><div class="ed-sumchips"><span class="ed-chip">● AI summary</span>${meta.models?`<span class="ed-chip">${esc(modelShort(meta.models))}</span>`:''}${meta.grade?`<span class="ed-chip g-${esc(meta.grade)}" style="border-color:currentColor">${esc(meta.grade)}</span>`:''}<span class="ed-chip" style="color:var(--green);border-color:rgba(125,216,125,.4)">grounded in the transcript</span></div></div>`:"";
@@ -1929,9 +1940,15 @@ function jobAct(id,action){
   fetch("/api/cards/job",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({id,action})}).then(()=>pollBackfill()).catch(()=>{});
 }
+let RECARD_SEEN=null;
 async function pollBackfill(){
   clearTimeout(bfTimer);
   const s=await api("/api/backfill");
+  if(s.recard_done&&s.recard_done.at&&s.recard_done.at!==RECARD_SEEN){
+    RECARD_SEEN=s.recard_done.at;
+    toast(`re-carding complete — ${s.recard_done.n||0} cards replaced`);
+    if($("#view-settings")&&$("#view-settings").style.display!=="none")loadSettings();
+  }
   const jobs=s.jobs||[];
   const head=jobs.length?`<div class="bf-meta" style="padding:0 0 4px;color:var(--dim);display:flex;align-items:center;gap:6px">✦ <b style="color:var(--phos)">${s.running_count}/${s.max_parallel}</b> running${s.queued_count?` · ${s.queued_count} waiting`:""}<span class="bf-btn" style="color:var(--ember);margin-left:auto" onclick="stopBackfill()">■ stop all</span></div>`:"";
   const g=$("#bf-global");if(g)g.innerHTML=jobs.length?head+jobs.map(bfJobRow).join(""):"";
@@ -2078,6 +2095,11 @@ async function loadDashboard(){
       <i class="info" data-tip="Reliability per provider × model: every generation attempt is logged (success or failure) with a bucketed reason. Spot which provider is worth your tokens and why cards fail."></i>
       <div class="hint" style="margin-top:6px">loading attempts…</div>
     </div>
+    <div class="genwrap" id="dash-tags" style="margin-top:14px">
+      <b style="color:var(--phos)">Tags</b>
+      <i class="info" data-tip="Live analytics over thread_tags — what you work on (per family), which themes cluster (co-occurrence), and how each kind of work tends to end (tag × outcome). Fills in as carding tags more threads. Click any tag to recall it."></i>
+      <div class="hint" style="margin-top:6px">loading tags…</div>
+    </div>
     <div class="hint" style="margin-top:12px">${esc(c.note)} · pricing table per model family, cache-aware</div>`;
   const scopedByModel={};d.daily.forEach(r=>{
     scopedByModel[r.model]=Math.round(((scopedByModel[r.model]||0)+r.cost)*100)/100;});
@@ -2085,6 +2107,43 @@ async function loadDashboard(){
   drawDonut(scopeLabel?scopedByModel:c.by_model);
   drawProj(c.by_project,d.project);
   loadCardHealth();
+  loadTagPanel();
+}
+async function loadTagPanel(){
+  const box=$("#dash-tags"); if(!box)return;
+  const d=await api("/api/tags");
+  const pr=await api("/api/tags/proposed").catch(()=>({proposed:[],total:0}));
+  if(d.error||!d.tagged_threads){
+    box.innerHTML=`<b style="color:var(--phos)">Tags</b><div class="hint" style="margin-top:6px">${d.error?esc(d.error):"no tags yet — they fill in as carding runs"}</div>`;return;}
+  const fam=d.by_family||{};
+  const ORDER=["domain","activity","topic","technology","pattern","intent","outcome","decision","artifact","event","context","entity"];
+  const fams=Object.keys(fam).sort((a,b)=>ORDER.indexOf(a)-ORDER.indexOf(b));
+  const short=t=>esc(t.split(":").slice(1).join(":"));
+  const chip=(t,n)=>`<span class="badge" style="cursor:pointer" onclick="tagSearch('${esc(t)}')" title="recall ${esc(t)} (${n} threads)">${short(t)} <b style="color:var(--phos)">${n}</b></span>`;
+  const famBlock=fams.map(f=>`<div style="margin-bottom:7px"><span class="hint" style="display:inline-block;width:88px;color:var(--cyan)">${esc(f)}</span>${(fam[f]||[]).map(v=>chip(f+":"+v.value,v.n)).join(" ")}</div>`).join("");
+  const co=(d.cooccur||[]).slice(0,18).map(p=>`<span class="badge" style="cursor:pointer" title="${p.n} threads share both" onclick="tagSearch('${esc(p.a)}')">${short(p.a)} ↔ ${short(p.b)} <b style="color:var(--phos)">${p.n}</b></span>`).join(" ");
+  const oc=(d.outcome||[]).filter(r=>!r.tag.startsWith("outcome:")).slice(0,12).map(r=>{
+    const s=r.success||0,ps=r.partial_success||0,fl=(r.failure||0)+(r.blocked||0)+(r.abandoned||0),tot=r._total||1,pct=x=>Math.round(100*x/tot);
+    return `<div style="display:flex;align-items:center;gap:8px;margin:3px 0;font-size:11px">
+      <span style="width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;color:var(--cyan)" onclick="tagSearch('${esc(r.tag)}')" title="${esc(r.tag)} · ${tot} threads">${esc(r.tag)}</span>
+      <span style="flex:1;display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--line)">
+        <span style="width:${pct(s)}%;background:var(--green)"></span><span style="width:${pct(ps)}%;background:var(--phos)"></span><span style="width:${pct(fl)}%;background:var(--ember)"></span></span>
+      <span class="hint" style="width:30px;text-align:right">${tot}</span></div>`;}).join("");
+  const prop=(pr&&pr.proposed)||[];
+  const triage=prop.length?`<div style="margin-top:14px"><div class="hint" style="margin-bottom:5px">invented tags not in your vocabulary (${pr.total}) — <span style="color:var(--green)">✓</span> promote to known vocab · <span style="color:var(--ember)">✕</span> dismiss</div>${prop.slice(0,30).map(p=>`<span class="badge" style="margin:2px 3px">${esc(p.family)}:<b>${esc(p.value)}</b> <span style="color:var(--dim)">${p.threads}</span> <span class="bf-btn" style="color:var(--green)" title="add to taxonomy.json (known vocab)" onclick="promoteTag('${esc(p.family)}','${esc(p.value)}')">✓</span> <span class="bf-btn" style="color:var(--ember)" title="dismiss (blacklist + remove)" onclick="dismissTag('${esc(p.family)}','${esc(p.value)}')">✕</span></span>`).join(" ")}</div>`:"";
+  box.innerHTML=`<b style="color:var(--phos)">Tags</b><span class="hint"> · ${d.tagged_threads} threads tagged · click any tag to recall</span>
+    <div style="margin-top:10px">${famBlock}</div>
+    ${co?`<div style="margin-top:8px"><div class="hint" style="margin-bottom:4px">themes that cluster together</div>${co}</div>`:""}
+    ${oc?`<div style="margin-top:12px"><div class="hint" style="margin-bottom:4px">how each kind of work tends to end &nbsp;<span style="color:var(--green)">■</span> resolved <span style="color:var(--phos)">■</span> partial <span style="color:var(--ember)">■</span> failed</div>${oc}</div>`:""}
+    ${triage}`;
+}
+async function promoteTag(f,v){
+  await fetch("/api/tags/promote",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({family:f,value:v})});
+  toast(`promoted ${f}:${v} → known vocab`);loadTagPanel();
+}
+async function dismissTag(f,v){
+  await fetch("/api/tags/blacklist",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({family:f,value:v})});
+  toast(`dismissed ${f}:${v}`);loadTagPanel();
 }
 async function loadCardHealth(){
   const el=$("#card-health");if(!el)return;
@@ -2267,11 +2326,32 @@ async function ftHist(path){
       </div>
       <div class="ft-railwrap"><span class="ft-raillabel">TIME-TRAVEL</span><div id="ft-rail">${ftRailInner(defA,defB)}</div></div>
     </div>
+    <div id="ft-story"></div>
     <div class="ft-diff-wrap">
       <div class="ft-side"><div class="hint" style="margin:0 0 6px 4px">${FT_FILES.length?"files in scope":""}</div>${ftSidebar()}</div>
       <div class="ft-main"><div id="ft-panes"></div></div>
     </div>`;
   ftPanes();
+  ftStory(path);
+}
+async function ftStory(path){
+  const box=$("#ft-story");if(!box)return;
+  const s=await api("/api/filestory",{path}).catch(()=>({groups:[]}));
+  const g=((s&&s.groups)||[]).filter(x=>x.prompt_id&&x.title);
+  if(!g.length){box.innerHTML="";return}
+  const tagOf=x=>(x.tags||[]).filter(t=>/^(topic|technology|pattern):/.test(t));
+  box.innerHTML=`<div class="genwrap" style="margin-bottom:12px">
+    <b style="color:var(--phos)">Story — what changed &amp; why</b>
+    <span class="hint"> · ${g.length} thread${g.length>1?"s":""} shaped this file</span>
+    <div style="margin-top:10px;display:flex;flex-direction:column;gap:10px">
+    ${g.map(x=>`<div style="border-left:2px solid var(--line);padding:1px 0 1px 12px">
+      <div style="font-size:11px;color:var(--dim)">v${x.from}${x.to!==x.from?"–"+x.to:""} · ${x.edits} edit${x.edits>1?"s":""} · ${esc((x.ts||"").slice(0,10))}
+        <span class="bf-btn" onclick="openThread('${esc(x.prompt_id)}')" title="open this thread verbatim">thread ↗</span></div>
+      <div style="font-size:13px;color:var(--text);margin-top:2px">${x.type?`<span class="badge b-${esc(x.type)}">${esc(x.type)}</span> `:""}${esc(x.title)}${x.outcome?` <span class="hint">— ${esc(x.outcome)}</span>`:""}</div>
+      ${(x.decisions||[]).slice(0,2).map(d=>`<div class="summary" style="opacity:.85;margin-top:2px">⚖ ${esc(d)}</div>`).join("")}
+      ${tagOf(x).length?`<div style="margin-top:3px">${tagOf(x).slice(0,6).map(t=>`<span class="badge" style="cursor:pointer" onclick="tagSearch('${esc(t)}')">${esc(t)}</span>`).join(" ")}</div>`:""}
+    </div>`).join("")}
+    </div></div>`;
 }
 function ftRailInner(a,b){
   const n=FT_VERS.length;
@@ -2434,7 +2514,40 @@ async function loadSettings(){
     <span style="margin-left:14px;font-size:12px;color:var(--dim)">trigger at
       <input type="number" id="ap-pct" min="50" max="95" value="${cfg.autoprune_pct||80}" style="width:58px;background:var(--ink3);border:1px solid var(--line);color:var(--text);padding:3px 6px;border-radius:4px"> % context</span>
     <button class="ghost" style="margin-left:14px" onclick="saveAutoPrune()">save</button>
+  </div>
+  <div style="border:1px solid var(--line);border-radius:6px;padding:14px 16px;margin-top:14px">
+    <div style="font:600 14px var(--serif);color:var(--phos);margin-bottom:8px">re-card mode
+      <i class="info" data-tip="When ON, the next backfill run REPLACES every existing card with a fresh gpt-oss card + tags. Gap-free: each old card stays until its new one lands. On completion it auto-switches OFF and normal carding resumes. Live carding of new threads keeps running throughout."></i></div>
+    <label style="font-size:12px;color:var(--text);cursor:pointer">
+      <input type="checkbox" id="recard-on" ${cfg.recard_mode?"checked":""} onchange="saveRecard(this.checked)"> replace existing cards on the next run</label>
+    <button class="ghost" style="margin-left:14px" onclick="recardAll()" title="re-card every thread now — replace every card with a fresh gpt-oss card + tags (gap-free)">re-card all now ▶</button>
+    <div class="hint" style="margin-top:6px">${cfg.recard_mode?'<b style="color:var(--phos)">ON</b> — the next run re-cards everything (then auto-flips off)':'off — runs card only uncarded threads'}</div>
+  </div>
+  <div style="border:1px solid var(--line);border-radius:6px;padding:14px 16px;margin-top:14px">
+    <div style="font:600 14px var(--serif);color:var(--phos);margin-bottom:8px">externalise reasoning
+      <i class="info" data-tip="Injects a terse reminder on every user turn (UserPromptSubmit hook) to think in text — state decisions, rejected alternatives, findings — so fable captures the WHY, not just the WHAT. Sentinel-wrapped so it never enters the index. Applies to every Claude Code session on this machine."></i></div>
+    <label style="font-size:12px;color:var(--text);cursor:pointer">
+      <input type="checkbox" id="ext-on" ${cfg.externalize_enabled?"checked":""} onchange="saveExternalize(this.checked)"> remind me to externalise reasoning each turn</label>
+    <div class="hint" style="margin-top:6px">${cfg.externalize_enabled?'<b style="color:var(--green)">ON</b> — richer reasoning is captured into memory':'off'}</div>
   </div>`;
+}
+async function saveExternalize(on){
+  await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({externalize_enabled:!!on})});
+  loadSettings();
+}
+async function saveRecard(on){
+  await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({recard_mode:!!on})});
+  loadSettings();
+}
+async function recardAll(){
+  if(!await confirmModal("Re-card ALL threads?\n\nReplaces every existing card with a fresh gpt-oss card + tags — gap-free (each old card stays until its new one lands). Large free job; pause/stop any time; the switch auto-flips off when done."))return;
+  const r=await fetch("/api/cards/run",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({recard:true})}).then(x=>x.json());
+  if(r.error){toast(r.error);return}
+  toast(`re-carding ${r.candidates||""} threads — replacing with gpt-oss + tags`);
+  pollBackfill();
 }
 
 /* ── stats tab ── */

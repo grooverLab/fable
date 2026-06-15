@@ -24,6 +24,11 @@ _HC_SPAN = re.compile(
     r"<historical_context\b[^>]*>.*?(?:</historical_context>|\Z)",
     re.IGNORECASE | re.DOTALL)
 _ATTR = re.compile(r'(\w+)="([^"]*)"')
+# fable's own injected directives (e.g. the externalisation reminder) must
+# never enter the index — strip them like recalled-memory spans
+_FABLE_DIRECTIVE = re.compile(
+    r"<fable-externalize\b[^>]*>.*?(?:</fable-externalize>|\Z)",
+    re.IGNORECASE | re.DOTALL)
 
 
 def strip_historical(text: str) -> Tuple[str, List[str]]:
@@ -70,6 +75,7 @@ def extract_full(obj) -> Tuple[List[Tuple[str, str]], List[str]]:
             return
         cleaned, found = strip_historical(text)
         refs.extend(found)
+        cleaned = _FABLE_DIRECTIVE.sub("", cleaned)
         # surrogateescape chars from invalid UTF-8 can't enter SQLite
         cleaned = _clean(cleaned).strip()
         cleaned = cleaned.encode("utf-8", "replace").decode("utf-8")

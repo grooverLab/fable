@@ -34,6 +34,11 @@ TOOLS = [
                            "file/crate/identifier facet"},
                 "project": {"type": "string"},
                 "kind": {"type": "string", "enum": ["main", "subagent"]},
+                "tag": {"type": "string", "description":
+                        "taxonomy filter 'family:value' (e.g. 'topic:auth', "
+                        "'decision:architecture', 'technology:rust'); a bare "
+                        "value matches any family. DISCOVER valid tags first "
+                        "via fable_tags."},
                 "sort": {"type": "string",
                          "enum": ["relevance", "turns", "tokens", "recent"]},
                 "limit": {"type": "integer", "default": 10},
@@ -190,6 +195,25 @@ TOOLS = [
             "required": ["path", "a", "b"],
         },
     },
+    {
+        "name": "fable_tags",
+        "description": (
+            "DISCOVER the taxonomy tags fable assigns to threads, for precise "
+            "tag-filtered recall. Call with NO args to list the tag FAMILIES "
+            "(domain, activity, topic, technology, pattern, intent, outcome, "
+            "decision…) with counts; call with family='<one>' to list THAT "
+            "family's values. Then pass tag='family:value' to fable_search to "
+            "scope recall to exactly that kind of work — progressive "
+            "disclosure, so you never need the whole taxonomy up front."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "family": {"type": "string", "description":
+                           "omit to list families; pass one (e.g. 'topic') "
+                           "to list its tag values"},
+            },
+        },
+    },
 ]
 
 
@@ -201,6 +225,7 @@ def _call_tool(db_path, name, args):
                       target=args.get("target"),
                       project=args.get("project"),
                       kind=args.get("kind"),
+                      tag=args.get("tag"),
                       sort=args.get("sort", "relevance"),
                       limit=int(args.get("limit", 10)))
         return json.dumps(hits, indent=1)
@@ -279,6 +304,31 @@ def _call_tool(db_path, name, args):
         versions = reconstruct(file_events(db_path, args["path"]))
         return "\n".join(
             file_diff(versions, int(args["a"]), int(args["b"])))
+    if name == "fable_tags":
+        from fable import db as _fdb
+        fam = args.get("family")
+        conn = _fdb.connect(db_path)
+        try:
+            if fam:
+                rows = conn.execute(
+                    "SELECT value, COUNT(DISTINCT prompt_id) n FROM thread_tags"
+                    " WHERE family = ? GROUP BY value ORDER BY n DESC LIMIT 80",
+                    (fam,)).fetchall()
+                out = {"family": fam,
+                       "values": [{"value": v, "threads": n} for v, n in rows],
+                       "usage": "fable_search(query='…', tag='%s:<value>')" % fam}
+            else:
+                rows = conn.execute(
+                    "SELECT family, COUNT(DISTINCT value),"
+                    " COUNT(DISTINCT prompt_id) FROM thread_tags"
+                    " GROUP BY family ORDER BY 3 DESC").fetchall()
+                out = {"families": [{"family": f, "values": nv, "threads": nt}
+                                    for f, nv, nt in rows],
+                       "usage": "fable_tags(family='<one above>') for its "
+                                "values, then fable_search(tag='family:value')"}
+        finally:
+            conn.close()
+        return json.dumps(out, indent=1)
     raise KeyError(f"unknown tool: {name}")
 
 

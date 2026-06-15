@@ -222,6 +222,33 @@ def _tail_index(db_path, transcript):
         _log(db_path, f"tail-index failed: {e}")
 
 
+_EXTERNALIZE = (
+    "<fable-externalize>\n"
+    "Reason in TEXT — it is what fable indexes into memory (your thinking "
+    "blocks and tool results get pruned; only your prose survives). Before a "
+    "non-trivial action, state the decision and the rejected alternative; "
+    "after a finding, write \"Found: …\". Name the files, errors and decisions "
+    "explicitly so future sessions can recall the WHY, not just the WHAT.\n"
+    "</fable-externalize>")
+
+
+def _externalize_note(db_path: str) -> str:
+    """Reasoning-externalisation reminder injected each user turn (default ON;
+    suppressed only when meta externalize_enabled='0'). Sentinel-wrapped so the
+    extractor strips it — it nudges the model without entering the index."""
+    try:
+        from fable import db as fdb
+        conn = fdb.connect(db_path)
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='externalize_enabled'").fetchone()
+        conn.close()
+        if row and row[0] == "0":
+            return ""
+    except Exception:
+        return ""
+    return _EXTERNALIZE
+
+
 def run_hook(db_path: str, payload: dict) -> dict:
     transcript = payload.get("transcript_path")
     event = payload.get("hook_event_name", "?")
@@ -245,6 +272,10 @@ def run_hook(db_path: str, payload: dict) -> dict:
         payload = dict(payload, tool_name="Bash")
         result = _post_tool(payload)
         _tail_index(db_path, transcript)
+        note = _externalize_note(db_path)
+        if note:
+            result["inject"] = note
+            result["event"] = "UserPromptSubmit"
         return result
 
     if event == "SessionStart":
@@ -349,7 +380,7 @@ def cmd_hook(args) -> int:
         result = run_hook(args.db, payload)
         if result.get("inject"):
             print(json.dumps({"hookSpecificOutput": {
-                "hookEventName": "SessionStart",
+                "hookEventName": result.get("event", "SessionStart"),
                 "additionalContext": result["inject"]}}))
         elif result.get("system_message"):
             print(json.dumps({"systemMessage": result["system_message"]}))
