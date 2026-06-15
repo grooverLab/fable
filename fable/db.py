@@ -175,6 +175,10 @@ def connect(path: str, create: bool = False) -> sqlite3.Connection:
         raise FileNotFoundError(
             f"no fable index at {path!r} — run `fable index` or "
             f"`fable discover` first (or pass --db)")
+    if create and path != ":memory:":
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")

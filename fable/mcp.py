@@ -243,5 +243,9 @@ def serve_stdio(db_path):
 
 def cmd_mcp(args):
     from fable import db as fdb
-    fdb.connect(args.db).close()  # fail fast if no index
+    # Ensure an index exists, creating an empty one if needed, so the server
+    # always starts and can answer introspection (initialize / tools/list) —
+    # e.g. in a fresh container (Glama) or on first run. Tools return empty
+    # results until `fable index` populates it.
+    fdb.connect(args.db, create=True).close()
     return serve_stdio(args.db)
