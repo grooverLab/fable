@@ -258,6 +258,17 @@ def build_parser():
     sp.set_defaults(fn=lambda a: __import__(
         "fable.setup", fromlist=["cmd_setup"]).cmd_setup(a))
 
+    sp = sub.add_parser(
+        "install",
+        help="one-command setup: MCP + hooks + home + first index")
+    sp.add_argument("--no-index", action="store_true",
+                    help="skip the initial transcript scan")
+    sp.add_argument("--hook-command", default="fable hook",
+                    help="command the Claude Code hooks invoke "
+                         "(default: fable hook)")
+    sp.set_defaults(fn=lambda a: __import__(
+        "fable.setup", fromlist=["cmd_install"]).cmd_install(a))
+
     sp = sub.add_parser("discover",
                         help="find and index all Claude Code projects")
     sp.add_argument("--projects-dir", default=None)

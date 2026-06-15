@@ -35,12 +35,39 @@ real one.**
 
 ```bash
 pipx install git+https://github.com/grooverLab/fable
-fable discover      # every conversation you ever had — unlocked, in seconds
+fable install       # one command: register the MCP, install hooks, index your history
 fable serve         # browse your memory in a dashboard
 ```
 
 100% local · no API keys · no cloud · no daemons. Your conversations
 never leave your machine.
+
+<details>
+<summary><b>Setup &amp; commands</b></summary>
+
+```bash
+pipx install git+https://github.com/grooverLab/fable   # install the CLI
+fable install        # one-shot: claude mcp add + Claude Code hooks +
+                     # ~/.fable home + index every transcript
+fable serve          # dashboard at http://127.0.0.1:8765
+pipx upgrade fable-recall   # update later (pulls latest from GitHub)
+```
+
+`fable install` is idempotent — safe to re-run; it skips anything already wired.
+To do it by hand: `fable setup` (home) · `claude mcp add fable -- fable mcp` (MCP) · `fable discover` (index).
+
+| command | what it does |
+|---|---|
+| `fable search <q>` | rank threads by relevance (`--project`, `--kind`, `-n`) |
+| `fable context <q>` | assemble a budgeted context pack |
+| `fable thread <id>` | a thread's raw turns, byte-identical |
+| `fable file <path>` | a file's full edit history across sessions |
+| `fable cards run` | generate AI summary cards (background) |
+| `fable discover` | (re)scan + index all Claude Code projects |
+| `fable prune` · `fable export` · `fable stats` | slim a session · export · index stats |
+| `fable serve` | the dashboard |
+
+</details>
 
 - **Ask about past conversations with Claude — get the real answer.**
   *"What did we decide about auth last month?"* Claude searches its own

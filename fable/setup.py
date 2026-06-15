@@ -101,3 +101,96 @@ def cmd_setup(args) -> int:
                      migrate_db=args.migrate_db, move_env=args.move_env)
     print(json.dumps(info, indent=2))
     return 0
+
+
+# fable's Claude Code hooks: event -> per-event options (matcher / timeout).
+# Same set the dashboard reports as "hook_installed".
+HOOK_EVENTS = {
+    "SessionStart": {"timeout": 30},
+    "UserPromptSubmit": {},
+    "Stop": {},
+    "SubagentStop": {},
+    "PreCompact": {"timeout": 120},
+    "PostToolUse": {"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read"},
+}
+
+
+def install_hooks(command="fable hook") -> dict:
+    """Idempotently register fable's hooks in Claude Code settings.json.
+    Skips any event that already has a fable hook. Best-effort, never raises."""
+    path = _settings_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    hooks = data.setdefault("hooks", {})
+    installed = 0
+    for event, opts in HOOK_EVENTS.items():
+        groups = hooks.setdefault(event, [])
+        if any("fable" in hk.get("command", "")
+               for g in groups for hk in g.get("hooks", [])):
+            continue  # already wired
+        entry = {"type": "command", "command": command}
+        if opts.get("timeout"):
+            entry["timeout"] = opts["timeout"]
+        group = {"hooks": [entry]}
+        if opts.get("matcher"):
+            group["matcher"] = opts["matcher"]
+        groups.append(group)
+        installed += 1
+    if installed:
+        if os.path.exists(path):
+            shutil.copy2(path, path + ".bak-fable")
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    return {"installed": installed, "settings": path}
+
+
+def register_mcp() -> str:
+    """Register the fable MCP server with Claude Code (user scope). Best-effort."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["claude", "mcp", "add", "--scope", "user", "fable", "--",
+             "fable", "mcp"],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            return "registered (user scope)"
+        msg = ((r.stderr or "") + (r.stdout or "")).strip().lower()
+        if "already" in msg:
+            return "already registered"
+        return "run manually: claude mcp add fable -- fable mcp"
+    except FileNotFoundError:
+        return "claude CLI not found — run: claude mcp add fable -- fable mcp"
+    except Exception as e:  # pragma: no cover
+        return "skipped (%s)" % str(e)[:60]
+
+
+def cmd_install(args) -> int:
+    """One-command onboarding: ~/.fable home + MCP registration + Claude Code
+    hooks + an initial transcript scan."""
+    import subprocess
+    import sys
+    print("⊹ fable install")
+    info = run_setup()
+    print("  home    ", info["home"])
+    print("  vault   ", info["vault"])
+    print("  db      ", info["db"])
+    print("  mcp     ", register_mcp())
+    hk = install_hooks(command=args.hook_command)
+    print("  hooks   ", "%d newly wired -> %s" % (hk["installed"], hk["settings"]))
+    if not args.no_index:
+        print("  index    scanning Claude Code transcripts "
+              "(first run can take a minute)…")
+        try:
+            subprocess.run([sys.executable, "-m", "fable", "discover"],
+                           check=False)
+        except Exception as e:
+            print("  index    skipped (%s) — run `fable discover` later"
+                  % str(e)[:80])
+    print("\n✅ fable is set up. Launch the dashboard:  fable serve")
+    return 0
