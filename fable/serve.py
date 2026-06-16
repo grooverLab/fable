@@ -5,6 +5,7 @@ read; the dashboard can never mutate the index or the vault.
 """
 import json
 import os
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -904,8 +905,53 @@ def api_cards(db_path, params):
         conn.close()
 
 
+def api_tasks(db_path, params):
+    """Task ledger (tasktime) — the durable backlog: every task ever raised,
+    its work-project (files-touched, not cwd) and drift. Reads the materialized
+    `tasks` table (instant); the fat-union scan only runs on first build /
+    POST /api/tasks/rebuild, and the live capture hook keeps it current."""
+    from fable import tasktime
+    return tasktime.read(db_path)
+
+
+def post_tasks_rebuild(db_path, body):
+    """Force a full fat-union re-scan into the tasks table (the slow path)."""
+    from fable import tasktime
+    return tasktime.materialize(db_path)
+
+
+def post_tasks_meta(db_path, body):
+    """M6: user overlay on a task — remove / set priority / note. Keyed by
+    (session, task_id); merges with any existing overlay row. The ledger stays
+    read-only; this never touches the vault-derived `tasks` table."""
+    from fable import db as fdb, tasktime
+    import time as _t
+    sess, tid = body.get("session"), body.get("task_id")
+    if not sess or tid is None:
+        raise ValueError("session and task_id required")
+    conn = fdb.connect(db_path)
+    try:
+        conn.execute(tasktime._OVERLAY_DDL)
+        cur = conn.execute("SELECT removed,priority,note FROM task_meta "
+                           "WHERE session=? AND task_id=?",
+                           (sess, tid)).fetchone()
+        removed = body.get("removed", cur[0] if cur else 0)
+        priority = body.get("priority", cur[1] if cur else None)
+        note = body.get("note", cur[2] if cur else None)
+        conn.execute(
+            "INSERT OR REPLACE INTO task_meta(session,task_id,removed,priority,"
+            "note,updated_ts) VALUES(?,?,?,?,?,?)",
+            (sess, tid, int(removed or 0), priority, note,
+             _t.strftime("%Y-%m-%dT%H:%M:%S")))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "removed": int(removed or 0), "priority": priority}
+
+
 ROUTES = {
     "/api/stats": api_stats,
+    "/api/tasks": api_tasks,
     "/api/projects": api_projects,
     "/api/search": api_search,
     "/api/threads": api_threads,
@@ -1791,6 +1837,8 @@ POST_ROUTES["/api/cards/job"] = post_cards_job
 POST_ROUTES["/api/tags/promote"] = post_tags_promote
 POST_ROUTES["/api/tags/blacklist"] = post_tags_blacklist
 POST_ROUTES["/api/tags/autopromote"] = post_tags_autopromote
+POST_ROUTES["/api/tasks/rebuild"] = post_tasks_rebuild
+POST_ROUTES["/api/tasks/meta"] = post_tasks_meta
 ROUTES["/api/backfill"] = api_backfill_progress
 
 

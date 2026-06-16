@@ -249,6 +249,65 @@ def _externalize_note(db_path: str) -> str:
     return _EXTERNALIZE
 
 
+def _capture_task(db_path, payload):
+    """M2 live capture: on a TaskCreate/TaskUpdate PostToolUse, upsert the task
+    into the materialized `tasks` table immediately — no fat-union rebuild. The
+    result carries the exact id ('Task #N created: subject'); TaskUpdate input
+    carries the status. Project is provisional (cwd basename) until a rebuild
+    reconciles the true work-project. Never raises — hooks must not break tools."""
+    tool = payload.get("tool_name") or ""
+    if tool not in ("TaskCreate", "TaskUpdate"):
+        return
+    import re
+    import time as _t
+    from fable import db as fdb, tasktime
+    inp = payload.get("tool_input") or {}
+    resp = payload.get("tool_response")
+    if isinstance(resp, dict):
+        resp = resp.get("content") or json.dumps(resp)
+    if isinstance(resp, list):
+        resp = " ".join(x.get("text", "") if isinstance(x, dict) else str(x)
+                        for x in resp)
+    resp = str(resp or "")
+    m = re.search(r'Task #(\d+) (?:created|updated)[^:]*:\s*(.*)', resp, re.S)
+    tid = (int(m.group(1)) if m
+           else int(inp["taskId"]) if str(inp.get("taskId", "")).isdigit()
+           else None)
+    if tid is None:
+        return
+    session = payload.get("session_id") or ""
+    proj = os.path.basename(payload.get("cwd") or "") or None
+    ts = _t.strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        conn = fdb.connect(db_path)
+        conn.execute(tasktime._TASKS_DDL)
+        if tool == "TaskCreate":
+            desc = inp.get("description") or ""
+            subj = (m.group(2).strip()[:90] if m and m.group(2).strip()
+                    else desc.splitlines()[0][:90] if desc else "(empty)")
+            cur = conn.execute(
+                "UPDATE tasks SET subject=?, ts=? WHERE session=? AND task_id=?",
+                (subj, ts, session, tid))
+            if cur.rowcount == 0:
+                conn.execute(
+                    "INSERT INTO tasks(session,task_id,ts,project,subject,status,"
+                    "drifted,interp,prompt_id,source,cwd) "
+                    "VALUES(?,?,?,?,?,'pending',1,0,NULL,'task',?)",
+                    (session, tid, ts, proj, subj, proj))
+        else:
+            status = inp.get("status")
+            if status:
+                conn.execute(
+                    "UPDATE tasks SET status=?, drifted=? "
+                    "WHERE session=? AND task_id=?",
+                    (status, 0 if status in ("completed", "deleted") else 1,
+                     session, tid))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def run_hook(db_path: str, payload: dict) -> dict:
     transcript = payload.get("transcript_path")
     event = payload.get("hook_event_name", "?")
@@ -256,6 +315,7 @@ def run_hook(db_path: str, payload: dict) -> dict:
 
     if event == "PostToolUse":
         result = _post_tool(payload)
+        _capture_task(db_path, payload)        # M2: live task ledger
         msg = _auto_prune(db_path, payload)
         if msg:
             result["system_message"] = msg
@@ -310,6 +370,23 @@ def run_hook(db_path: str, payload: dict) -> dict:
                 "conversation, a past decision, or a prior code discussion "
                 "that isn't in your context, call fable_search instead of "
                 "guessing — it indexes this and every past session, verbatim.")
+        # M7: resurface this project's open/drifted tasks so they don't get lost
+        try:
+            from fable import tasktime
+            rows, total = tasktime.open_for_project(db_path, project, 8)
+            if rows:
+                lines = [
+                    f"  #{r[0]} [{r[1]}] {(r[2] or '')[:78]}"
+                    + (f"  ·P{r[3]}" if r[3] is not None else "") for r in rows]
+                more = (f"\n  …and {total - len(rows)} more — open the Tasks tab"
+                        if total > len(rows) else "")
+                parts.append(
+                    f"<fable-open-tasks project=\"{project}\" count=\"{total}\">\n"
+                    f"{total} open task(s) in this project, resurfaced so they "
+                    f"don't drift — pick one up, or mark done / remove if stale:\n"
+                    + "\n".join(lines) + more + "\n</fable-open-tasks>")
+        except Exception:
+            pass
         return {"ok": True, "event": event, "inject": "\n".join(parts)}
 
     if not transcript or not os.path.exists(transcript):

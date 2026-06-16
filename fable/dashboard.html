@@ -371,6 +371,7 @@ button.danger:hover{background:#ff8557}
     <button class="tab" data-tab="files" title="Files — time-travel diffs"><i>▤</i><span>FILES</span></button>
     <button class="tab" data-tab="cards" title="Cards — AI summaries"><i>▦</i><span>CARDS</span></button>
     <button class="tab" data-tab="triage" title="Triage — review &amp; promote invented tags"><i>⊺</i><span>TRIAGE</span></button>
+    <button class="tab" data-tab="tasks" title="Tasks — the durable backlog &amp; drift across every session"><i>☑</i><span>TASKS</span></button>
     <button class="tab" data-tab="prune" title="Prune — slim a session"><i>⚗</i><span>PRUNE</span></button>
     <button class="tab" data-tab="compose" title="Compose / Loom"><i>⊞</i><span>LOOM</span><span class="tabbadge" id="bk-count" style="display:none"></span></button>
     <button class="tab" data-tab="graph" title="Graph"><i>◌</i><span>GRAPH</span></button>
@@ -671,6 +672,7 @@ button.danger:hover{background:#ff8557}
     </section>
     <section id="view-cards" style="display:none"><div class="loading">loading cards…</div></section>
     <section id="view-triage" style="display:none"><div class="loading">loading triage…</div></section>
+    <section id="view-tasks" style="display:none"><div class="loading">reconstructing the backlog…</div></section>
 
     <section id="view-costs" style="display:none"><div class="loading">computing telemetry…</div></section>
 
@@ -765,12 +767,13 @@ function showTab(name){
   activeTab=name;
   if($("#bb-tab"))$("#bb-tab").textContent=name;
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
-  for(const v of ["search","thread","compose","graph","editor","prune","files","cards","triage","costs","settings","stats","logs"])
+  for(const v of ["search","thread","compose","graph","editor","prune","files","cards","triage","tasks","costs","settings","stats","logs"])
     $("#view-"+v).style.display="none";
   $("#view-"+(name==="search"&&currentThread==="open"?"thread":name)).style.display="";
   if(name==="compose")renderLoom();
   if(name==="cards")loadCards();
   if(name==="triage")loadTriage();
+  if(name==="tasks")loadTasks();
   if(name==="stats")loadStats();
   if(name==="logs")loadLogs();
   if(name==="graph"){loadGraph().then(()=>{
@@ -2033,6 +2036,97 @@ async function autoPromote(){
 function refreshTriage(){
   if($("#view-triage")&&$("#view-triage").style.display!=="none")loadTriage();
   else if($("#dash-tags"))loadTagPanel();
+}
+
+/* ── Tasks tab: the durable backlog (tasktime) ── */
+let TASKS_DATA=null, TASKS_F={status:"all",q:"",proj:null}, TASKS_OPEN={};
+const TSTAT={completed:["✓","var(--green)"],in_progress:["◐","var(--cyan)"],
+  pending:["○","var(--dim)"],deleted:["✗","var(--faint)"],unknown:["·","var(--faint)"]};
+async function loadTasks(force){
+  const view=$("#view-tasks");
+  if(!TASKS_DATA||force){
+    view.innerHTML='<div class="loading">reconstructing the backlog from the vault…</div>';
+    TASKS_DATA=await api("/api/tasks").catch(()=>null);
+  }
+  renderTasks();
+}
+function taskFilter(k,v){TASKS_F[k]=v;renderTasks();}
+function taskProj(p){TASKS_F.proj=TASKS_F.proj===p?null:p;renderTasks();}
+function taskType(s){TASKS_F.src=TASKS_F.src===s?null:s;renderTasks();}
+function taskToggle(p){TASKS_OPEN[p]=!TASKS_OPEN[p];renderTasks();}
+async function taskMetaPost(sess,id,fields){
+  await fetch("/api/tasks/meta",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(Object.assign({session:sess,task_id:id},fields))}).then(r=>r.json());
+  TASKS_DATA=await api("/api/tasks").catch(()=>TASKS_DATA);
+  renderTasks();
+}
+function taskCyclePrio(ev,sess,id,cur){ev.stopPropagation();
+  const di=cur==null?0:cur+1, ndi=(di+1)%5;            // ·, P0, P1, P2, P3
+  taskMetaPost(sess,id,{priority:ndi===0?null:ndi-1});}
+function taskRemove(ev,sess,id){ev.stopPropagation();
+  taskMetaPost(sess,id,{removed:1});}
+function renderTasks(){
+  const view=$("#view-tasks"), d=TASKS_DATA;
+  if(!d){view.innerHTML='<div class="empty">could not load the task ledger</div>';return;}
+  const f=TASKS_F, pct=d.created?Math.round(100*d.recovered/d.created):0;
+  const ts=d.tasks.filter(t=>{
+    if(f.src&&(t.source||"task")!==f.src)return false;
+    if(f.status==="open"&&!t.drifted)return false;
+    if(f.status==="completed"&&t.status!=="completed")return false;
+    if(f.status==="in_progress"&&t.status!=="in_progress")return false;
+    if(f.proj&&(t.project||"?")!==f.proj)return false;
+    if(f.q&&!(t.subject||"").toLowerCase().includes(f.q.toLowerCase()))return false;
+    return true;});
+  const groups={};
+  for(const t of ts){const p=t.project||"?";(groups[p]=groups[p]||[]).push(t);}
+  const order=Object.keys(groups).sort((a,b)=>groups[b].length-groups[a].length);
+  if(!Object.keys(TASKS_OPEN).length)order.forEach(p=>TASKS_OPEN[p]=true);
+  const pill=(k,lbl)=>`<span class="bf-btn" style="${f.status===k?'background:var(--phos);color:#04130c;border-color:var(--phos)':''}" onclick="taskFilter('status','${k}')">${lbl}</span>`;
+  const srcCount={}; d.tasks.forEach(t=>{const s=t.source||'task';srcCount[s]=(srcCount[s]||0)+1;});
+  const typePill=(s,lbl)=>`<span class="bf-btn" style="${(f.src||null)===s?'background:var(--cyan);color:#04130c;border-color:var(--cyan)':''}" onclick="taskType(${s?`'${s}'`:'null'})">${lbl}${s?' '+(srcCount[s]||0):''}</span>`;
+  const chip=p=>{const g=d.by_project[p]||{};return `<span class="badge" style="cursor:pointer;${f.proj===p?'border-color:var(--phos);color:var(--phos)':''}" onclick="taskProj('${esc(p)}')">${esc(p)} <b>${g.total||0}</b>${g.open?` <span style="color:var(--ember)">·${g.open}</span>`:''}</span>`;};
+  const body=p=>groups[p].slice().sort((a,b)=>{
+      const pa=a.priority==null?9:a.priority, pb=b.priority==null?9:b.priority;
+      if(pa!==pb)return pa-pb;
+      if(a.drifted!==b.drifted)return a.drifted?-1:1;
+      return (a.id||1e9)-(b.id||1e9);
+    }).map(t=>{
+    const s=TSTAT[t.status]||TSTAT.unknown;
+    const prov=t.prompt_id?`onclick="openThread('${t.prompt_id}')" style="cursor:pointer" title="open the source thread + card"`:'';
+    const acts=t.id!=null?`<td style="white-space:nowrap;text-align:right;padding:3px 10px 3px 6px">
+        <span onclick="taskCyclePrio(event,'${t.session}',${t.id},${t.priority==null?'null':t.priority})" title="cycle priority (·→P0→P1→P2→P3)" style="cursor:pointer;font-size:10.5px;padding:1px 5px;border:1px solid var(--line,#1d2a22);border-radius:4px;color:${t.priority!=null?'var(--phos)':'var(--faint)'}">${t.priority==null?'·':'P'+t.priority}</span>
+        <span onclick="taskRemove(event,'${t.session}',${t.id})" title="remove this task from the backlog" style="cursor:pointer;color:var(--faint);margin-left:7px">✕</span></td>`:'<td></td>';
+    return `<tr ${prov} class="trow">
+      <td style="color:var(--faint);text-align:right;padding:3px 8px 3px 12px;white-space:nowrap">#${t.id||"?"}${t.interp?'<span style="color:var(--faint)" title="id interpolated (no recovered result)">~</span>':''}</td>
+      <td style="white-space:nowrap;padding:3px 10px"><span style="color:${s[1]}">${s[0]} ${esc(t.status)}</span></td>
+      <td style="padding:3px 10px">${t.source==='inline'?'<span title="inline checkbox todo (from prose)" style="color:var(--faint);font-size:9px;border:1px solid var(--line,#1d2a22);border-radius:3px;padding:0 4px;margin-right:5px">✎</span>':''}${esc(t.subject)}${t.prompt_id?' <span style="color:var(--cyan);font-size:10px" title="traceable to its card + transcript">↗</span>':''}</td>
+      <td style="color:var(--faint);white-space:nowrap;text-align:right;padding:3px 6px 3px 10px">${esc((t.ts||"").slice(0,10))}</td>
+      ${acts}</tr>`;}).join("");
+  view.innerHTML=`<div style="margin-bottom:12px"><b style="color:var(--phos);font:600 16px var(--serif)">Backlog</b>
+      <span class="hint"> · every task ever raised — reconstructed from the vault's Task calls; drift = never reached completed</span></div>
+    <div class="statgrid" style="margin-bottom:12px">
+      <div class="stat"><div class="v">${fmt(d.created)}</div><div class="k">tasks raised</div></div>
+      <div class="stat"><div class="v" style="color:var(--green)">${fmt(d.completed)}</div><div class="k">completed</div></div>
+      <div class="stat"><div class="v" style="color:var(--ember)">${fmt(d.open)}</div><div class="k">open / drifted</div></div>
+      <div class="stat"><div class="v">${pct}%</div><div class="k">ids exact</div></div>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      ${pill("all","all")}${pill("open","open")}${pill("in_progress","in progress")}${pill("completed","done")}
+      <span style="color:var(--faint)">·</span>
+      ${typePill(null,"all types")}${typePill("task","tasks")}${typePill("inline","✎ inline")}${srcCount.idea?typePill("idea","ideas"):""}${srcCount.feature?typePill("feature","features"):""}
+      <input id="task-q" placeholder="filter tasks…" value="${esc(f.q)}" oninput="taskFilter('q',this.value)"
+        style="margin-left:auto;background:var(--panel,#0c1410);border:1px solid var(--line,#1d2a22);color:var(--text);padding:5px 9px;border-radius:5px;font-size:12px;width:210px"></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">${order.map(chip).join("")||'<span class="hint">—</span>'}</div>
+    <div class="results">${order.map(p=>{
+      const g=d.by_project[p]||{}, op=TASKS_OPEN[p];
+      return `<div class="genwrap" style="margin-bottom:8px;padding:0;overflow:hidden">
+        <div onclick="taskToggle('${esc(p)}')" style="cursor:pointer;padding:9px 12px;display:flex;align-items:center;gap:9px">
+          <span style="color:var(--phos);width:10px;display:inline-block">${op?"▾":"▸"}</span>
+          <b style="color:var(--text)">${esc(p)}</b>
+          <span class="hint">${groups[p].length} shown · <span style="color:var(--ember)">${g.open||0} open</span> / ${g.total||0} total</span></div>
+        ${op?`<table style="width:100%;border-collapse:collapse;font-size:12px;border-top:1px solid var(--line,#1d2a22)">${body(p)}</table>`:""}
+      </div>`;}).join("")||'<div class="empty">no tasks match this filter</div>'}</div>`;
+  const qi=$("#task-q"); if(qi&&f.q){qi.focus();qi.setSelectionRange(qi.value.length,qi.value.length);}
 }
 
 /* ── Dashboard tab: full usage + cost telemetry ── */
