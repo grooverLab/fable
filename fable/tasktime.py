@@ -410,6 +410,20 @@ def open_for_project(db_path, project, limit=8):
 
 
 _CHECKBOX = re.compile(r'^[ \t]*[-*][ \t]*\[([ xX])\][ \t]+(.+?)[ \t]*$', re.M)
+# leading ownership/role tag a planning checklist carries: **[ME]**, [YOU],
+# **[DECIDE]** … (letters/spaces only, ≤12 chars, so real subjects survive)
+_ROLE_TAG = re.compile(r"^\**\s*\[[A-Za-z][A-Za-z ]{0,11}\]\**\s*:?\s*")
+
+
+def _clean_subject(text: str) -> str:
+    """Make a prose-derived task subject read as a plain task: collapse
+    whitespace, drop a leading ownership/role tag (**[ME]**/[YOU]/[DECIDE]…),
+    and remove markdown bold/italic markers. Backticks are kept — they carry
+    meaning (`fable --version`)."""
+    s = re.sub(r"\s+", " ", str(text)).strip()
+    s = _ROLE_TAG.sub("", s)
+    s = s.replace("**", "").replace("__", "")
+    return s.strip(" *_").strip()
 
 
 def extract_inline(db_path, conn=None):
@@ -433,9 +447,7 @@ def extract_inline(db_path, conn=None):
             proj = wp.get(sid) or cwd.get(sid)
             for mm in _CHECKBOX.finditer(content or ""):
                 checked = mm.group(1).lower() == "x"
-                text = re.sub(r"\s+", " ", mm.group(2)).strip()
-                # strip leading markdown emphasis so dedup is stable
-                text = re.sub(r"^\*+|\*+$", "", text).strip()
+                text = _clean_subject(mm.group(2))
                 if not (4 <= len(text) <= 200):
                     continue
                 key = (sid, text.lower())
@@ -481,7 +493,7 @@ def extract_card_items(db_path, conn=None):
                 sid = pid_sess.get(pid)
                 proj = wp.get(sid) or cwd.get(sid)
                 for text in lst:
-                    text = re.sub(r"\s+", " ", str(text)).strip()
+                    text = _clean_subject(text)
                     if not (4 <= len(text) <= 200):
                         continue
                     tid = int(hashlib.md5((kind + text.lower()).encode())
