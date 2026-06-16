@@ -43,6 +43,9 @@ def api_stats(db_path, params):
             "SELECT COALESCE(SUM(size),0) FROM files").fetchone()[0]
         out["card_types"] = dict(conn.execute(
             "SELECT type, COUNT(*) FROM cards GROUP BY type").fetchall())
+        from fable.cards import FREE_ROTATION
+        fm = (FREE_ROTATION or [""])[0].split("/")[-1].replace(":free", "")
+        out["free_model"] = (fm + " (free rotation)") if fm else "free rotation"
         return out
     finally:
         conn.close()

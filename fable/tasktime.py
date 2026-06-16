@@ -317,12 +317,21 @@ def materialize(db_path):
             [(it["session"], it["task_id"], it["ts"], it["project"],
               it["subject"], it["status"], it["drifted"], it["prompt_id"],
               it["cwd"]) for it in inline])
+        carditems = extract_card_items(db_path, conn)   # M9: ideas/features
+        conn.executemany(
+            "INSERT INTO tasks(session,task_id,ts,project,subject,status,"
+            "drifted,interp,prompt_id,source,cwd) "
+            "VALUES(?,?,?,?,?,?,?,0,?,?,?)",
+            [(it["session"], it["task_id"], it["ts"], it["project"],
+              it["subject"], it["status"], it["drifted"], it["prompt_id"],
+              it["source"], it["cwd"]) for it in carditems])
         conn.execute("INSERT OR REPLACE INTO tasks_meta VALUES('status_changes',?)",
                      (str(lg["status_changes"]),))
         conn.commit()
     finally:
         conn.close()
     return {"materialized": len(lg["tasks"]), "inline": len(inline),
+            "card_items": len(carditems),
             "completed": lg["completed"], "open": lg["open"]}
 
 
@@ -440,6 +449,48 @@ def extract_inline(db_path, conn=None):
                     "subject": text[:90],
                     "status": "completed" if checked else "pending",
                     "drifted": 0 if checked else 1})
+        return items
+    finally:
+        if own:
+            conn.close()
+
+
+def extract_card_items(db_path, conn=None):
+    """M9: surface carder-extracted ideas[] / features[] as backlog items
+    (source='idea'/'feature'), each carrying its card's thread for provenance.
+    lessons/gotchas/open_questions stay on the card (search + the lessons loop),
+    not the task list. Returns [] until a re-card populates the columns."""
+    own = conn is None
+    conn = conn or fdb.connect(db_path)
+    try:
+        wp = work_projects(db_path, conn)
+        cwd = dict(conn.execute("SELECT session_id, project FROM sessions"))
+        pid_sess = dict(conn.execute("SELECT prompt_id, session_id FROM threads"))
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(cards)")]
+        items = []
+        for kind in ("ideas", "features"):
+            if kind not in cols:
+                continue
+            for pid, blob, ts in conn.execute(
+                    f"SELECT prompt_id, {kind}, created_at FROM cards "
+                    f"WHERE {kind} IS NOT NULL AND {kind} NOT IN ('[]','')"):
+                try:
+                    lst = json.loads(blob) or []
+                except (ValueError, TypeError):
+                    continue
+                sid = pid_sess.get(pid)
+                proj = wp.get(sid) or cwd.get(sid)
+                for text in lst:
+                    text = re.sub(r"\s+", " ", str(text)).strip()
+                    if not (4 <= len(text) <= 200):
+                        continue
+                    tid = int(hashlib.md5((kind + text.lower()).encode())
+                              .hexdigest()[:7], 16)
+                    items.append({
+                        "session": sid, "prompt_id": pid, "project": proj,
+                        "cwd": cwd.get(sid), "ts": ts or "", "task_id": tid,
+                        "subject": text[:90], "status": "pending",
+                        "drifted": 1, "source": kind[:-1]})    # idea / feature
         return items
     finally:
         if own:

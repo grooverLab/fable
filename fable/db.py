@@ -107,6 +107,11 @@ CREATE TABLE IF NOT EXISTS cards(
   type TEXT,
   topics TEXT,
   decisions TEXT,
+  ideas TEXT,
+  features TEXT,
+  lessons TEXT,
+  gotchas TEXT,
+  open_questions TEXT,
   files TEXT,
   outcome TEXT,
   summary TEXT,
@@ -201,7 +206,12 @@ def connect(path: str, create: bool = False) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(SCHEMA)
     for ddl in ("ALTER TABLE sessions ADD COLUMN pinned INTEGER DEFAULT 0",
-                "ALTER TABLE sessions ADD COLUMN tags TEXT"):
+                "ALTER TABLE sessions ADD COLUMN tags TEXT",
+                "ALTER TABLE cards ADD COLUMN ideas TEXT",
+                "ALTER TABLE cards ADD COLUMN features TEXT",
+                "ALTER TABLE cards ADD COLUMN lessons TEXT",
+                "ALTER TABLE cards ADD COLUMN gotchas TEXT",
+                "ALTER TABLE cards ADD COLUMN open_questions TEXT"):
         try:
             conn.execute(ddl)
         except sqlite3.OperationalError:

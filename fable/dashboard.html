@@ -390,7 +390,7 @@ button.danger:hover{background:#ff8557}
 
   <aside>
     <div class="side-h">Backfill engine
-      <i class="info" data-tip="Which LLM generates thread cards when you hit ✦ cards on a project. openrouter = free Gemma (needs key in Settings). anthropic = API key billing. claude-cli = headless `claude -p` through your installed Claude Code — bills your Max/Pro SUBSCRIPTION quota, not API credits; runs in a scratch CLAUDE_CONFIG_DIR so its sessions are never indexed back (no inception)."></i>
+      <i class="info" data-tip="Which LLM generates thread cards when you hit ✦ cards on a project. openrouter = free rotation (needs key in Settings). anthropic = API key billing. claude-cli = headless `claude -p` through your installed Claude Code — bills your Max/Pro SUBSCRIPTION quota, not API credits; runs in a scratch CLAUDE_CONFIG_DIR so its sessions are never indexed back (no inception)."></i>
     </div>
     <div style="padding:0 18px 10px;display:flex;gap:6px;min-width:0">
       <select id="bf-provider" style="flex:1 1 0;font-size:11px" onchange="bfModelOptions();localStorage.setItem('fable-provider',this.value)">
@@ -804,6 +804,8 @@ api("/api/stats").then(s=>{
     `<b>${fmt(s.vault_bytes)}B</b> vault · <b>${fmt(s.records)}</b> turns · `+
     `<b>${fmt(s.threads)}</b> threads · <b>${fmt(s.sessions)}</b> sessions · `+
     `<b>${fmt(s.cards)}</b> cards`;
+  if(s.free_model){BF_MODELS.openrouter=[["",s.free_model]];
+    if($("#bf-provider")&&$("#bf-provider").value==="openrouter")bfModelOptions();}
 });
 
 /* ── sidebar tree ── */
@@ -872,7 +874,7 @@ api("/api/projects").then(projects=>{
     <div class="proj ${i===0?"open":""}" data-project="${esc(p.project)}">
       <div class="proj-name" onclick="this.parentNode.classList.toggle('open')">
         <span class="tw">▶</span>${esc(p.project)}
-        <span class="bf-btn" title="generate cards for every uncarded thread in this project (OpenRouter free Gemma)" onclick="event.stopPropagation();startBackfill('${esc(p.project)}')">✦ cards</span>
+        <span class="bf-btn" title="generate cards for every uncarded thread in this project (OpenRouter free rotation)" onclick="event.stopPropagation();startBackfill('${esc(p.project)}')">✦ cards</span>
         <span class="count">${p.sessions.length}</span>
       </div>
       <div class="bf-slot"></div>
@@ -1881,7 +1883,7 @@ async function forgetFact(id){
 }
 
 /* ── per-project card backfill (provider-aware) ── */
-const BF_MODELS={openrouter:[["","gemma (free, default)"]],
+const BF_MODELS={openrouter:[["","free rotation"]],
   anthropic:[["haiku","haiku (cheapest)"],["sonnet","sonnet (better)"]],
   "claude-cli":[["haiku","haiku (Max quota)"],["sonnet","sonnet (Max quota)"]],
   ollama:[["","llama3.2 (default)"],["qwen2.5","qwen2.5"],
