@@ -269,7 +269,8 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
            session: Optional[str] = None,
            tag: Optional[str] = None,
            since: Optional[str] = None,
-           until: Optional[str] = None) -> List[dict]:
+           until: Optional[str] = None,
+           offset: int = 0) -> List[dict]:
     """kind: 'main' | 'subagent' (majority-sidechain threads);
     model/project: substring match; session: exact session scope;
     since/until: ISO date or timestamp window on the thread's activity;
@@ -327,7 +328,7 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
             sql += "GROUP BY prompt_id ORDER BY score DESC LIMIT ?"
         else:
             sql += "ORDER BY est_tokens DESC LIMIT ?"
-        args.append(max(limit * 5, 200))
+        args.append(max((limit + offset) * 5, 200))
         try:
             hits = conn.execute(sql, args).fetchall()
         except sqlite3.OperationalError as e:
@@ -436,15 +437,16 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
                 h["low_confidence"] = h["score_pct"] < _LOW_CONF_PCT
         results.sort(key=SORT_KEYS.get(sort, SORT_KEYS["relevance"]),
                      reverse=(sort == "recent"))
-        fdb.log_op(db_path, "search", q=query or "", hits=len(results[:limit]))
-        return results[:limit]
+        page = results[offset:offset + limit]
+        fdb.log_op(db_path, "search", q=query or "", hits=len(page))
+        return page
     finally:
         conn.close()
 
 
 def timeline(db_path: str, since: Optional[str] = None,
              until: Optional[str] = None, project: Optional[str] = None,
-             limit: int = 50) -> dict:
+             limit: int = 50, offset: int = 0) -> dict:
     """Browse threads BY TIME — the 'what was I working on around <date>'
     view, no search query needed. since/until take a date (YYYY-MM-DD) or a
     full ISO timestamp; a date-only `until` is inclusive of that whole day.
@@ -494,8 +496,8 @@ def timeline(db_path: str, since: Optional[str] = None,
         rows = conn.execute(
             f"SELECT t.prompt_id, t.first_ts, t.last_ts, t.turn_count, "
             f"t.est_tokens, t.session_id FROM threads t WHERE {clause} "
-            f"ORDER BY t.first_ts DESC LIMIT ?",
-            args + [int(limit)]).fetchall()
+            f"ORDER BY t.first_ts DESC LIMIT ? OFFSET ?",
+            args + [int(limit), int(offset)]).fetchall()
         threads = []
         for pid, fts, lts, tc, tok, sid in rows:
             sess = conn.execute(
@@ -516,7 +518,8 @@ def timeline(db_path: str, since: Optional[str] = None,
         fdb.log_op(db_path, "timeline", q=f"{since or ''}..{until or ''}",
                    hits=len(threads))
         return {"since": since, "until": until, "project": project,
-                "total_in_window": total, "returned": len(threads),
+                "total_in_window": total, "offset": offset,
+                "returned": len(threads),
                 "totals": {"threads": total, "turns": tot_turns,
                            "est_tokens": tot_tokens},
                 "by_day": by_day, "threads": threads}

@@ -49,6 +49,8 @@ TOOLS = [
                           "only threads active on/before this date or ISO "
                           "timestamp; a bare date is inclusive of that day"},
                 "limit": {"type": "integer", "default": 10},
+                "offset": {"type": "integer", "default": 0,
+                           "description": "skip first N results (pagination)"},
             },
             "required": ["query"],
         },
@@ -73,6 +75,8 @@ TOOLS = [
                 "project": {"type": "string", "description":
                             "scope to a project (substring match)"},
                 "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0,
+                           "description": "skip first N (pagination)"},
             },
         },
     },
@@ -272,6 +276,8 @@ TOOLS = [
                            "enum": ["task", "inline", "idea", "feature"],
                            "description": "filter by where the task came from"},
                 "limit": {"type": "integer", "default": 30},
+                "offset": {"type": "integer", "default": 0,
+                           "description": "skip first N (pagination)"},
             },
         },
     },
@@ -296,6 +302,8 @@ TOOLS = [
                           "only decisions from threads on/before this date/ISO"},
                 "limit": {"type": "integer", "default": 40, "description":
                           "threads to scan (each may yield several decisions)"},
+                "offset": {"type": "integer", "default": 0,
+                           "description": "skip first N decisions (pagination)"},
             },
             "required": ["query"],
         },
@@ -318,6 +326,46 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "fable_failures",
+        "description": (
+            "WHAT DID I ALREADY TRY THAT FAILED? — the dead-end mirror of "
+            "fable_decisions. Pulls 'tried X, it didn't work because Y' across "
+            "past threads: gotchas, lessons, and blocked/failed outcomes. Use "
+            "before re-attempting a bug or approach, so you don't repeat a "
+            "known failure. Each item carries its kind (gotcha/lesson/"
+            "blocked_outcome), prompt_id, and relevance score."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "project": {"type": "string"},
+                "since": {"type": "string"},
+                "until": {"type": "string"},
+                "limit": {"type": "integer", "default": 40, "description":
+                          "threads to scan"},
+                "offset": {"type": "integer", "default": 0},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fable_similar",
+        "description": (
+            "MORE LIKE THIS — given one thread's prompt_id, return its nearest "
+            "neighbours by meaning (card-embedding cosine). Use to expand from a "
+            "good hit without guessing new search terms — e.g. after fable_search "
+            "lands one strong thread, pull related ones. Returns prompt_id + "
+            "similarity + card title/type/outcome."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt_id": {"type": "string"},
+                "limit": {"type": "integer", "default": 8},
+            },
+            "required": ["prompt_id"],
+        },
+    },
 ]
 
 
@@ -332,14 +380,17 @@ def _call_tool(db_path, name, args):
                       tag=args.get("tag"),
                       sort=args.get("sort", "relevance"),
                       since=args.get("since"), until=args.get("until"),
-                      limit=int(args.get("limit", 10)))
+                      limit=int(args.get("limit", 10)),
+                      offset=int(args.get("offset", 0)))
         return json.dumps(hits, indent=1)
     if name == "fable_timeline":
         from fable.recall import timeline
         return json.dumps(timeline(db_path, since=args.get("since"),
                                     until=args.get("until"),
                                     project=args.get("project"),
-                                    limit=int(args.get("limit", 50))), indent=1)
+                                    limit=int(args.get("limit", 50)),
+                                    offset=int(args.get("offset", 0))),
+                          indent=1)
     if name == "fable_thread":
         from fable.recall import render_thread
         return render_thread(db_path, args["prompt_id"],
@@ -494,8 +545,76 @@ def _call_tool(db_path, name, args):
                             "score_pct": h.get("score_pct"),
                             "low_confidence": h.get("low_confidence"),
                             "last_ts": h.get("last_ts")})
+        offset = int(args.get("offset", 0))
         return json.dumps({"query": args["query"], "count": len(out),
-                           "decisions": out}, indent=1)
+                           "offset": offset, "decisions": out[offset:]},
+                          indent=1)
+    if name == "fable_failures":
+        # the dead-end mirror of fable_decisions: what was TRIED and didn't
+        # work — gotchas, lessons, and blocked/failed outcomes — so an agent
+        # doesn't re-attempt a known failure.
+        from fable.recall import search
+        from fable import db as _fdb
+
+        def _jl(s):
+            try:
+                v = json.loads(s or "[]")
+                return v if isinstance(v, list) else []
+            except (ValueError, TypeError):
+                return []
+        hits = search(db_path, args["query"], project=args.get("project"),
+                      since=args.get("since"), until=args.get("until"),
+                      limit=int(args.get("limit", 40)))
+        _BAD = ("block", "fail", "couldn't", "could not", "didn't work",
+                "did not work", "abandon", "revert", "broke", "wrong")
+        out, conn = [], _fdb.connect(db_path)
+        try:
+            for h in hits:
+                row = conn.execute(
+                    "SELECT gotchas, lessons, outcome FROM cards "
+                    "WHERE prompt_id = ?", (h["prompt_id"],)).fetchone()
+                if not row:
+                    continue
+                items = ([("gotcha", g) for g in _jl(row[0])]
+                         + [("lesson", l) for l in _jl(row[1])])
+                if any(w in (row[2] or "").lower() for w in _BAD):
+                    items.append(("blocked_outcome", row[2]))
+                for kind, text in items:
+                    out.append({"kind": kind, "text": text,
+                                "prompt_id": h["prompt_id"],
+                                "title": h.get("title"),
+                                "project": h.get("project"),
+                                "score_pct": h.get("score_pct"),
+                                "last_ts": h.get("last_ts")})
+        finally:
+            conn.close()
+        offset = int(args.get("offset", 0))
+        return json.dumps({"query": args["query"], "count": len(out),
+                           "offset": offset, "failures": out[offset:]},
+                          indent=1)
+    if name == "fable_similar":
+        from fable.embeddings import similar
+        from fable import db as _fdb
+        neighbors = similar(db_path, args["prompt_id"],
+                            limit=int(args.get("limit", 8)))
+        if not neighbors:
+            return json.dumps(
+                {"prompt_id": args["prompt_id"], "neighbors": [],
+                 "note": "no embeddings (run `fable embed`) or this thread "
+                         "isn't embedded"}, indent=1)
+        out, conn = [], _fdb.connect(db_path)
+        try:
+            for pid, cos in neighbors:
+                c = conn.execute(
+                    "SELECT title, type, outcome FROM cards "
+                    "WHERE prompt_id = ?", (pid,)).fetchone() or (
+                        None, None, None)
+                out.append({"prompt_id": pid, "similarity": cos,
+                            "title": c[0], "type": c[1], "outcome": c[2]})
+        finally:
+            conn.close()
+        return json.dumps({"prompt_id": args["prompt_id"], "neighbors": out},
+                          indent=1)
     if name == "fable_tasks":
         from collections import Counter
         from fable import tasktime
@@ -504,6 +623,7 @@ def _call_tool(db_path, name, args):
         status = args.get("status", "open")
         source = args.get("source")
         limit = int(args.get("limit", 30))
+        offset = int(args.get("offset", 0))
         matched = []
         for t in data.get("tasks", []):
             st = t.get("status")
@@ -520,17 +640,21 @@ def _call_tool(db_path, name, args):
             if proj and proj not in (t.get("project") or "").lower():
                 continue
             matched.append(t)
-        matched.sort(key=lambda t: (t.get("ts") or ""), reverse=True)  # recent first
+        matched.sort(key=lambda t: (t.get("ts") or ""), reverse=True)
         # summary reflects THIS query's filters, not the global ledger
         by_project = dict(Counter(
             (t.get("project") or "?") for t in matched).most_common())
-        tasks, seen = [], set()
+        # dedup near-identical mined tasks, THEN paginate the deduped set
+        deduped, seen = [], set()
         for t in matched:
             subj = " ".join((t.get("subject") or "").split())
             key = (t.get("project"), subj.lower())
-            if key in seen:                 # drop near-duplicate mined tasks
+            if key in seen:
                 continue
             seen.add(key)
+            deduped.append((t, subj))
+        tasks = []
+        for t, subj in deduped[offset:offset + limit]:
             if len(subj) > 96:              # truncate on a word boundary
                 subj = subj[:96].rsplit(" ", 1)[0] + "…"
             tasks.append({
@@ -538,11 +662,9 @@ def _call_tool(db_path, name, args):
                 "source": t.get("source"), "project": t.get("project"),
                 "ts": t.get("ts"), "priority": t.get("priority"),
                 "prompt_id": t.get("prompt_id")})
-            if len(tasks) >= limit:
-                break
         return json.dumps({
             "status": status, "project": args.get("project"),
-            "matched": len(matched), "shown": len(tasks),
+            "matched": len(deduped), "offset": offset, "shown": len(tasks),
             "by_project": by_project, "tasks": tasks}, indent=1)
     raise KeyError(f"unknown tool: {name}")
 

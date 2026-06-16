@@ -178,11 +178,8 @@ def embed_cards(db_path: str, on_progress=None) -> dict:
 _CACHE = {"key": None, "rows": None}
 
 
-def semantic_hits(db_path: str, query: str, limit: int = 10):
-    """Top card matches by cosine; [] if no backend or no embeddings."""
-    be = backend()
-    if not be:
-        return []
+def _vectors(db_path: str):
+    """All (prompt_id, vec) embedding rows, cached by (db_path, row count)."""
     conn = fdb.connect(db_path)
     try:
         n = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
@@ -195,16 +192,17 @@ def semantic_hits(db_path: str, query: str, limit: int = 10):
                 for pid, blob, dim in conn.execute(
                     "SELECT prompt_id, vec, dim FROM embeddings")]
             _CACHE["key"] = key
+        return _CACHE["rows"]
     finally:
         conn.close()
-    try:
-        qvec = embed_texts([query], be)[0]
-    except (EmbeddingError, urllib.error.URLError, OSError):
-        return []
+
+
+def _neighbors(rows, qvec, limit, exclude=None):
+    """Top prompt_ids by cosine to qvec across rows (best vec per prompt_id)."""
     qnorm = math.sqrt(sum(x * x for x in qvec)) or 1.0
-    best = {}  # prompt_id -> best cosine across its card/thread vectors
-    for pid, vec in _CACHE["rows"]:
-        if len(vec) != len(qvec):
+    best = {}
+    for pid, vec in rows:
+        if pid == exclude or len(vec) != len(qvec):
             continue
         dot = sum(a * b for a, b in zip(qvec, vec))
         vnorm = math.sqrt(sum(x * x for x in vec)) or 1.0
@@ -213,6 +211,34 @@ def semantic_hits(db_path: str, query: str, limit: int = 10):
             best[pid] = cos
     scored = sorted(((c, pid) for pid, c in best.items()), reverse=True)
     return [(pid, round(c, 4)) for c, pid in scored[:limit] if c > 0.3]
+
+
+def semantic_hits(db_path: str, query: str, limit: int = 10):
+    """Top card matches by cosine; [] if no backend or no embeddings."""
+    be = backend()
+    if not be:
+        return []
+    rows = _vectors(db_path)
+    if not rows:
+        return []
+    try:
+        qvec = embed_texts([query], be)[0]
+    except (EmbeddingError, urllib.error.URLError, OSError):
+        return []
+    return _neighbors(rows, qvec, limit)
+
+
+def similar(db_path: str, prompt_id: str, limit: int = 8):
+    """Nearest-neighbour threads to a given one (more-like-this), by card/
+    thread embedding cosine. [] if no backend/embeddings or id not embedded —
+    no re-embedding, it reuses the vectors already stored."""
+    if not backend():
+        return []
+    rows = _vectors(db_path)
+    selfvecs = [vec for pid, vec in rows if pid == prompt_id]
+    if not selfvecs:
+        return []
+    return _neighbors(rows, selfvecs[0], limit, exclude=prompt_id)
 
 
 def cmd_embed(args) -> int:
