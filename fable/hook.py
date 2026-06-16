@@ -230,7 +230,7 @@ def _ensure_session_row(db_path, transcript):
     ran. Create it the moment it's indexed; never clobber a discover-built row."""
     import datetime
     from fable import db as fdb
-    from fable.discover import session_title, project_label
+    from fable.discover import session_title, project_label, project_from_cwd
     sid = os.path.basename(transcript)
     if sid.endswith(".jsonl"):
         sid = sid[:-6]
@@ -244,7 +244,8 @@ def _ensure_session_row(db_path, transcript):
                 "WHERE session_id=? AND (live_path IS NULL OR live_path='')",
                 (transcript, sid))
         else:
-            proj = project_label(os.path.basename(os.path.dirname(transcript)))
+            proj = (project_from_cwd(transcript)
+                    or project_label(os.path.basename(os.path.dirname(transcript))))
             conn.execute(
                 "INSERT INTO sessions(session_id, project, title, live_path,"
                 " indexed_at) VALUES(?,?,?,?,?)",

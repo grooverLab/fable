@@ -444,22 +444,65 @@ def file_diff(versions: List[dict], a: int, b: int) -> List[str]:
         fromfile=tag(va, a), tofile=tag(vb, b), lineterm=""))
 
 
-def known_files(db_path: str, query: str = "", limit: int = 40) -> List[dict]:
-    """File paths Claude has edited, from the terms index (kind=target,
-    looks-like-a-path), ranked by mention count."""
+_EDITED_CACHE: dict = {}  # db_path -> (record_count, {path: n})
+
+
+def edited_files(db_path: str) -> dict:
+    """Files Claude actually touched — from the `file_path`/`path` arg of
+    Edit/Write/MultiEdit/Read tool_use, NOT regex-scraped from prose. (The
+    prose path-extractor in terms.py pulls `myvix.rs` and code spans like
+    fable_files("vix.rs") out of discussion; those are not files.) Returns
+    {path: touch_count}. Memoized by record count: the full-vault scan runs
+    once, then repeat calls are instant until new records are indexed."""
     conn = fdb.connect(db_path)
     try:
+        nrec = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+        cached = _EDITED_CACHE.get(db_path)
+        if cached and cached[0] == nrec:
+            return cached[1]
         rows = conn.execute(
-            "SELECT term, SUM(count) AS n FROM terms "
-            "WHERE kind='target' AND (term LIKE '%/%' OR term LIKE '%.%') "
-            "GROUP BY term").fetchall()
+            "SELECT DISTINCT r.uuid, f.path, r.offset, r.length "
+            "FROM records r JOIN files f ON f.id = r.file_id "
+            "JOIN fts ft ON ft.uuid = r.uuid "
+            "WHERE r.block_kinds LIKE '%tool_use%' AND (ft.content LIKE '%Edit%'"
+            " OR ft.content LIKE '%Write%' OR ft.content LIKE '%Read%')"
+        ).fetchall()
     finally:
         conn.close()
+    tools = set(EDIT_TOOLS) | {"Read"}
+    counts: dict = {}
+    for _uuid, fpath, offset, length in rows:
+        try:
+            obj = json.loads(read_span(fpath, offset, length)
+                             .decode("utf-8", "surrogateescape"))
+        except (OSError, ValueError):
+            continue
+        msg = obj.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if (isinstance(b, dict) and b.get("type") == "tool_use"
+                    and b.get("name") in tools):
+                inp = b.get("input") or {}
+                fp = inp.get("file_path") or inp.get("path")
+                if fp and isinstance(fp, str):
+                    counts[fp] = counts.get(fp, 0) + 1
+    _EDITED_CACHE[db_path] = (nrec, counts)
+    return counts
+
+
+def known_files(db_path: str, query: str = "", limit: int = 40) -> List[dict]:
+    """Files Claude has actually edited/read — sourced from tool_use file_path
+    args (NOT prose-scraped path tokens). Representations of the same file
+    (vix.rs / src/vix.rs / /abs/…/vix.rs) are coalesced onto one canonical
+    path so history isn't fragmented across keys."""
+    raw = edited_files(db_path)
     # fold representations of the same file onto one canonical path
-    cmap = _canonical_map([t for t, _ in rows])
+    cmap = _canonical_map(list(raw))
     merged: dict = {}
-    for t, n in rows:
-        k = cmap[t]
+    for path, n in raw.items():
+        k = cmap[path]
         merged[k] = merged.get(k, 0) + n
     q = query.lower()
     out = [{"path": p, "mentions": n} for p, n in merged.items()

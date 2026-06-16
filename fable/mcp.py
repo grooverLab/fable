@@ -41,9 +41,38 @@ TOOLS = [
                         "via fable_tags."},
                 "sort": {"type": "string",
                          "enum": ["relevance", "turns", "tokens", "recent"]},
+                "since": {"type": "string", "description":
+                          "only threads active on/after this date or ISO "
+                          "timestamp (YYYY-MM-DD or full ISO)"},
+                "until": {"type": "string", "description":
+                          "only threads active on/before this date or ISO "
+                          "timestamp; a bare date is inclusive of that day"},
                 "limit": {"type": "integer", "default": 10},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "fable_timeline",
+        "description": (
+            "BROWSE PAST WORK BY TIME — answer 'what was I working on "
+            "around <date>' / 'last week' / 'on June 14' with NO search query. "
+            "Returns the threads active in a date window, newest-first, each "
+            "with project, card title, type, outcome and tags — then open one "
+            "verbatim with fable_thread. Use when the user anchors on WHEN "
+            "rather than WHAT. Pass since/until as a date (YYYY-MM-DD) or full "
+            "ISO timestamp; a bare `until` date includes that whole day."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {"type": "string", "description":
+                          "window start — date or ISO timestamp"},
+                "until": {"type": "string", "description":
+                          "window end — date (inclusive of the day) or ISO"},
+                "project": {"type": "string", "description":
+                            "scope to a project (substring match)"},
+                "limit": {"type": "integer", "default": 50},
+            },
         },
     },
     {
@@ -227,8 +256,15 @@ def _call_tool(db_path, name, args):
                       kind=args.get("kind"),
                       tag=args.get("tag"),
                       sort=args.get("sort", "relevance"),
+                      since=args.get("since"), until=args.get("until"),
                       limit=int(args.get("limit", 10)))
         return json.dumps(hits, indent=1)
+    if name == "fable_timeline":
+        from fable.recall import timeline
+        return json.dumps(timeline(db_path, since=args.get("since"),
+                                    until=args.get("until"),
+                                    project=args.get("project"),
+                                    limit=int(args.get("limit", 50))), indent=1)
     if name == "fable_thread":
         from fable.recall import render_thread
         return render_thread(db_path, args["prompt_id"],

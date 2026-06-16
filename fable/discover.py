@@ -27,6 +27,29 @@ def project_label(dirname: str) -> str:
     return seg or dirname
 
 
+def project_from_cwd(jsonl_path: str, max_lines: int = 40) -> Optional[str]:
+    """Real project name = basename of the session's cwd (stored verbatim in
+    records). The encoded dir name is lossy — Claude Code replaces BOTH '/' and
+    '_' with '-', so '…-00-opus-pocus' can't be split back to 'opus-pocus'. The
+    cwd is exact; this is the reliable source for the sidebar label."""
+    try:
+        with open(jsonl_path) as f:
+            for i, line in enumerate(f):
+                if i > max_lines:
+                    break
+                if '"cwd"' not in line:
+                    continue
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except json.JSONDecodeError:
+                    continue
+                if cwd:
+                    return os.path.basename(cwd.rstrip("/")) or None
+    except OSError:
+        pass
+    return None
+
+
 def is_fable_generated(jsonl_path: str, max_lines: int = 30) -> bool:
     """Defense-in-depth against indexing our own card-generation sessions:
     every fable prompt carries a FABLE-GENERATED marker."""
@@ -116,14 +139,17 @@ def _scan_projects(db_path, projects_dir, backup_roots, project_filter,
             if is_fable_generated(live):
                 seen_sessions.add(session_id)
                 continue
+            # real project name from the session's cwd; the dir-name heuristic
+            # is the fallback (it mangles multi-segment names like opus-pocus)
+            tlabel = project_from_cwd(live) or label
             vaults = (vaults_for_session(session_id, backup_roots)
                       if include_vaults else [])
             if progress:
-                progress(f"{label}/{session_id} "
+                progress(f"{tlabel}/{session_id} "
                          f"({len(vaults)} vault files)")
             stats = index_vault(db_path, vaults, live_file=live,
                                 extract_fn=fts_extract_fn,
-                                session_id=session_id, project=label,
+                                session_id=session_id, project=tlabel,
                                 rebuild=False)
             totals["sessions"] += 1
             totals["vault_files"] += len(vaults)
@@ -134,7 +160,7 @@ def _scan_projects(db_path, projects_dir, backup_roots, project_filter,
             conn.execute(
                 "INSERT OR REPLACE INTO sessions(session_id, project, title,"
                 " live_path, indexed_at) VALUES(?,?,?,?,?)",
-                (session_id, label, session_title(live), live,
+                (session_id, tlabel, session_title(live), live,
                  datetime.datetime.now(datetime.timezone.utc).isoformat()))
             conn.commit()
             conn.close()

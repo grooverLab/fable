@@ -2000,12 +2000,38 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+_DISCOVER_INTERVAL = 20  # seconds; unchanged files are skipped, so idle ≈ free
+
+
+def _discover_loop(db_path):
+    """Keep the Map fresh while serving: incremental discover on a timer, so a
+    brand-new project/session in ~/.claude/projects shows up in the sidebar with
+    no manual `fable discover` and no separate `watch` daemon. Runs once
+    immediately (catches anything indexed-but-unregistered or never-indexed),
+    then every _DISCOVER_INTERVAL. Incremental — unchanged files are skipped, so
+    idle cycles cost ~nothing; a failed cycle is silently retried and never
+    takes the server down."""
+    import time as _t
+    while True:
+        try:
+            from fable.discover import discover
+            discover(db_path)
+            from fable.embeddings import embed_cards, backend
+            if backend():
+                embed_cards(db_path)
+        except Exception:
+            pass
+        _t.sleep(_DISCOVER_INTERVAL)
+
+
 def serve(db_path: str, port: int = 8765, open_browser: bool = True):
     handler = type("BoundHandler", (Handler,), {"db_path": db_path})
     httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
     url = f"http://127.0.0.1:{httpd.server_port}"
     print(f"fable dashboard: {url}  (db: {db_path})  Ctrl-C to stop")
     threading.Thread(target=_live_card_loop, args=(db_path,),
+                     daemon=True).start()
+    threading.Thread(target=_discover_loop, args=(db_path,),
                      daemon=True).start()
     if open_browser:
         import webbrowser

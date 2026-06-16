@@ -51,9 +51,11 @@ class TestMcpServer(unittest.TestCase):
         by_id = {m["id"]: m for m in out}
         self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "fable")
         names = {t["name"] for t in by_id[2]["result"]["tools"]}
-        self.assertEqual(names, {"fable_search", "fable_thread",
-                                 "fable_block", "fable_context",
-                                 "fable_remember", "fable_prune"})
+        # the server grows tools over time; assert the core set is present
+        # rather than freezing an exact list that goes stale on every add
+        self.assertLessEqual({"fable_search", "fable_thread", "fable_block",
+                              "fable_context", "fable_remember", "fable_prune",
+                              "fable_timeline"}, names)
         hits = json.loads(by_id[3]["result"]["content"][0]["text"])
         self.assertEqual(hits[0]["prompt_id"], "p1")
         self.assertIn("fix the zigzag pivot detection",

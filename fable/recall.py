@@ -234,18 +234,33 @@ SORT_KEYS = {
 }
 
 
+def _time_bounds(since: Optional[str], until: Optional[str]):
+    """Normalize since/until. ISO-8601 sorts lexically, so a date or a full
+    timestamp both compare correctly. A date-only `until` (YYYY-MM-DD) is made
+    INCLUSIVE of that whole day; a date-only `since` is already an inclusive
+    lower bound as-is."""
+    if until and len(until) == 10:
+        until = until + "T23:59:59.999Z"
+    return since, until
+
+
 def search(db_path: str, query: str, operative: Optional[str] = None,
            target: Optional[str] = None, limit: int = 10,
            sort: str = "relevance", kind: Optional[str] = None,
            model: Optional[str] = None,
            project: Optional[str] = None,
            session: Optional[str] = None,
-           tag: Optional[str] = None) -> List[dict]:
+           tag: Optional[str] = None,
+           since: Optional[str] = None,
+           until: Optional[str] = None) -> List[dict]:
     """kind: 'main' | 'subagent' (majority-sidechain threads);
     model/project: substring match; session: exact session scope;
+    since/until: ISO date or timestamp window on the thread's activity;
     sort: relevance|turns|tokens|recent."""
     fts_query = _fts_query(query)
-    has_filters = any([operative, target, kind, model, project, session, tag])
+    since, until = _time_bounds(since, until)
+    has_filters = any([operative, target, kind, model, project, session, tag,
+                       since, until])
     if fts_query is None and not has_filters and sort == "relevance":
         return []
     conn = fdb.connect(db_path)
@@ -282,6 +297,14 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
                 sql += ("AND prompt_id IN (SELECT prompt_id FROM thread_tags "
                         "WHERE value = ?) ")
                 args.append(fam)
+        if since:
+            sql += ("AND prompt_id IN (SELECT prompt_id FROM threads "
+                    "WHERE last_ts >= ?) ")
+            args.append(since)
+        if until:
+            sql += ("AND prompt_id IN (SELECT prompt_id FROM threads "
+                    "WHERE first_ts <= ?) ")
+            args.append(until)
         if fts_query is not None:
             # over-fetch so post-filters/sorts still fill the limit
             sql += "GROUP BY prompt_id ORDER BY score DESC LIMIT ?"
@@ -373,5 +396,62 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
                      reverse=(sort == "recent"))
         fdb.log_op(db_path, "search", q=query or "", hits=len(results[:limit]))
         return results[:limit]
+    finally:
+        conn.close()
+
+
+def timeline(db_path: str, since: Optional[str] = None,
+             until: Optional[str] = None, project: Optional[str] = None,
+             limit: int = 50) -> dict:
+    """Browse threads BY TIME — the 'what was I working on around <date>'
+    view, no search query needed. since/until take a date (YYYY-MM-DD) or a
+    full ISO timestamp; a date-only `until` is inclusive of that whole day.
+    Returns threads in the window newest-first with project/title/type/tags
+    for scanning and a prompt_id to open via fable_thread. total_in_window is
+    the true count so truncation by `limit` is never silent."""
+    since, until = _time_bounds(since, until)
+    conn = fdb.connect(db_path)
+    try:
+        where = ["first_ts IS NOT NULL"]
+        args: list = []
+        if since:
+            where.append("last_ts >= ?")
+            args.append(since)
+        if until:
+            where.append("first_ts <= ?")
+            args.append(until)
+        if project:
+            where.append("session_id IN (SELECT session_id FROM sessions "
+                         "WHERE LOWER(project) LIKE ?)")
+            args.append(f"%{project.lower()}%")
+        clause = " AND ".join(where)
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM threads WHERE {clause}", args).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT prompt_id, first_ts, last_ts, turn_count, est_tokens, "
+            f"session_id FROM threads WHERE {clause} "
+            f"ORDER BY first_ts DESC LIMIT ?", args + [int(limit)]).fetchall()
+        threads = []
+        for pid, fts, lts, tc, tok, sid in rows:
+            sess = conn.execute(
+                "SELECT project, title FROM sessions WHERE session_id = ?",
+                (sid,)).fetchone() or (None, None)
+            card = conn.execute(
+                "SELECT title, type, outcome FROM cards WHERE prompt_id = ?",
+                (pid,)).fetchone() or (None, None, None)
+            tags = [f"{f}:{v}" for f, v in conn.execute(
+                "SELECT family, value FROM thread_tags WHERE prompt_id = ?"
+                " ORDER BY family", (pid,))]
+            threads.append({
+                "prompt_id": pid, "first_ts": fts, "last_ts": lts,
+                "turn_count": tc, "est_tokens": tok,
+                "session_id": sid, "project": sess[0],
+                "session_title": sess[1], "title": card[0],
+                "type": card[1], "outcome": card[2], "tags": tags})
+        fdb.log_op(db_path, "timeline", q=f"{since or ''}..{until or ''}",
+                   hits=len(threads))
+        return {"since": since, "until": until, "project": project,
+                "total_in_window": total, "returned": len(threads),
+                "threads": threads}
     finally:
         conn.close()
