@@ -359,9 +359,26 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
             sidechain_turns = meta[5] or 0
             agent = ("subagent" if turn_count and
                      sidechain_turns * 2 > turn_count else "main")
+            # matched passage: the best-ranked FTS row for this thread (a card
+            # match preferred), so a consumer sees WHY it matched without
+            # opening the whole thread. «…» mark the matched terms. None for
+            # browse mode or semantic-only hits (no lexical match to show).
+            snippet = None
+            if fts_query is not None:
+                try:
+                    srow = conn.execute(
+                        "SELECT snippet(fts, 0, '«', '»', '…', 16) FROM fts "
+                        "WHERE prompt_id = ? AND fts MATCH ? "
+                        "ORDER BY (kind='card') DESC, rank LIMIT 1",
+                        (prompt_id, fts_query)).fetchone()
+                    if srow and srow[0]:
+                        snippet = " ".join(srow[0].split())[:240]
+                except sqlite3.OperationalError:
+                    pass
             results.append({
                 "prompt_id": prompt_id, "matches": matches,
                 "score": round(score or 0.0, 3),
+                "snippet": snippet,
                 "turn_count": meta[0], "est_tokens": meta[1],
                 "first_ts": meta[2], "last_ts": meta[3],
                 "session_id": meta[4], "project": sess[0],
@@ -412,25 +429,48 @@ def timeline(db_path: str, since: Optional[str] = None,
     since, until = _time_bounds(since, until)
     conn = fdb.connect(db_path)
     try:
-        where = ["first_ts IS NOT NULL"]
+        where = ["t.first_ts IS NOT NULL"]
         args: list = []
         if since:
-            where.append("last_ts >= ?")
+            where.append("t.last_ts >= ?")
             args.append(since)
         if until:
-            where.append("first_ts <= ?")
+            where.append("t.first_ts <= ?")
             args.append(until)
         if project:
-            where.append("session_id IN (SELECT session_id FROM sessions "
+            where.append("t.session_id IN (SELECT session_id FROM sessions "
                          "WHERE LOWER(project) LIKE ?)")
             args.append(f"%{project.lower()}%")
         clause = " AND ".join(where)
         total = conn.execute(
-            f"SELECT COUNT(*) FROM threads WHERE {clause}", args).fetchone()[0]
+            f"SELECT COUNT(*) FROM threads t WHERE {clause}",
+            args).fetchone()[0]
+        # window aggregates + per-day rollup over the FULL window (not just the
+        # returned page) — answers "how much did I work" / "which days"
+        from collections import Counter, defaultdict
+        day = defaultdict(lambda: {"threads": 0, "est_tokens": 0,
+                                   "projects": Counter()})
+        tot_turns = tot_tokens = 0
+        for d, p, tok, turns in conn.execute(
+                f"SELECT substr(t.first_ts,1,10), COALESCE(s.project,'?'), "
+                f"COALESCE(t.est_tokens,0), COALESCE(t.turn_count,0) "
+                f"FROM threads t LEFT JOIN sessions s "
+                f"ON s.session_id = t.session_id WHERE {clause}", args):
+            a = day[d]
+            a["threads"] += 1
+            a["est_tokens"] += tok
+            a["projects"][p] += 1
+            tot_turns += turns
+            tot_tokens += tok
+        by_day = [{"date": d, "threads": a["threads"],
+                   "est_tokens": a["est_tokens"],
+                   "top_projects": [p for p, _ in a["projects"].most_common(3)]}
+                  for d, a in sorted(day.items(), reverse=True)]
         rows = conn.execute(
-            f"SELECT prompt_id, first_ts, last_ts, turn_count, est_tokens, "
-            f"session_id FROM threads WHERE {clause} "
-            f"ORDER BY first_ts DESC LIMIT ?", args + [int(limit)]).fetchall()
+            f"SELECT t.prompt_id, t.first_ts, t.last_ts, t.turn_count, "
+            f"t.est_tokens, t.session_id FROM threads t WHERE {clause} "
+            f"ORDER BY t.first_ts DESC LIMIT ?",
+            args + [int(limit)]).fetchall()
         threads = []
         for pid, fts, lts, tc, tok, sid in rows:
             sess = conn.execute(
@@ -452,6 +492,8 @@ def timeline(db_path: str, since: Optional[str] = None,
                    hits=len(threads))
         return {"since": since, "until": until, "project": project,
                 "total_in_window": total, "returned": len(threads),
-                "threads": threads}
+                "totals": {"threads": total, "turns": tot_turns,
+                           "est_tokens": tot_tokens},
+                "by_day": by_day, "threads": threads}
     finally:
         conn.close()

@@ -275,6 +275,31 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "fable_decisions",
+        "description": (
+            "WHY DID WE DECIDE X? — pull just the decision statements (the "
+            "verbatim 'chose X over Y because Z' lines) from past threads "
+            "matching a query, WITHOUT opening each thread. Use when the user "
+            "asks why something was done a certain way, what approach was "
+            "picked, or what was ruled out. Each decision carries its thread "
+            "(prompt_id), title, project and date for provenance via "
+            "fable_thread."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "project": {"type": "string"},
+                "since": {"type": "string", "description":
+                          "only decisions from threads on/after this date/ISO"},
+                "until": {"type": "string", "description":
+                          "only decisions from threads on/before this date/ISO"},
+                "limit": {"type": "integer", "default": 20, "description":
+                          "threads to scan (each may yield several decisions)"},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -397,6 +422,20 @@ def _call_tool(db_path, name, args):
         finally:
             conn.close()
         return json.dumps(out, indent=1)
+    if name == "fable_decisions":
+        from fable.recall import search
+        hits = search(db_path, args["query"], project=args.get("project"),
+                      since=args.get("since"), until=args.get("until"),
+                      limit=int(args.get("limit", 20)))
+        out = []
+        for h in hits:
+            for d in (h.get("decisions") or []):
+                out.append({"decision": d, "prompt_id": h["prompt_id"],
+                            "title": h.get("title"), "type": h.get("type"),
+                            "project": h.get("project"),
+                            "last_ts": h.get("last_ts")})
+        return json.dumps({"query": args["query"], "count": len(out),
+                           "decisions": out}, indent=1)
     if name == "fable_tasks":
         from fable import tasktime
         data = tasktime.read(db_path)
