@@ -294,7 +294,7 @@ TOOLS = [
                           "only decisions from threads on/after this date/ISO"},
                 "until": {"type": "string", "description":
                           "only decisions from threads on/before this date/ISO"},
-                "limit": {"type": "integer", "default": 20, "description":
+                "limit": {"type": "integer", "default": 40, "description":
                           "threads to scan (each may yield several decisions)"},
             },
             "required": ["query"],
@@ -426,41 +426,66 @@ def _call_tool(db_path, name, args):
         from fable.recall import search
         hits = search(db_path, args["query"], project=args.get("project"),
                       since=args.get("since"), until=args.get("until"),
-                      limit=int(args.get("limit", 20)))
+                      limit=int(args.get("limit", 40)))
         out = []
         for h in hits:
             for d in (h.get("decisions") or []):
                 out.append({"decision": d, "prompt_id": h["prompt_id"],
                             "title": h.get("title"), "type": h.get("type"),
                             "project": h.get("project"),
+                            "score_pct": h.get("score_pct"),
+                            "low_confidence": h.get("low_confidence"),
                             "last_ts": h.get("last_ts")})
         return json.dumps({"query": args["query"], "count": len(out),
                            "decisions": out}, indent=1)
     if name == "fable_tasks":
+        from collections import Counter
         from fable import tasktime
         data = tasktime.read(db_path)
         proj = (args.get("project") or "").lower()
         status = args.get("status", "open")
         source = args.get("source")
         limit = int(args.get("limit", 30))
-        out = []
+        matched = []
         for t in data.get("tasks", []):
-            if status == "open" and not t.get("drifted"):
+            st = t.get("status")
+            # "open" = drifted AND a live status. 'unknown' (a task whose
+            # completion couldn't be resolved) is NOT open — counting it
+            # overstates the backlog.
+            if status == "open" and not (
+                    t.get("drifted") and st in ("pending", "in_progress")):
                 continue
-            if status == "completed" and t.get("status") != "completed":
+            if status == "completed" and st != "completed":
                 continue
             if source and (t.get("source") or "task") != source:
                 continue
             if proj and proj not in (t.get("project") or "").lower():
                 continue
-            out.append({k: t.get(k) for k in
-                        ("id", "subject", "status", "source", "project",
-                         "ts", "prompt_id", "priority")})
+            matched.append(t)
+        matched.sort(key=lambda t: (t.get("ts") or ""), reverse=True)  # recent first
+        # summary reflects THIS query's filters, not the global ledger
+        by_project = dict(Counter(
+            (t.get("project") or "?") for t in matched).most_common())
+        tasks, seen = [], set()
+        for t in matched:
+            subj = " ".join((t.get("subject") or "").split())
+            key = (t.get("project"), subj.lower())
+            if key in seen:                 # drop near-duplicate mined tasks
+                continue
+            seen.add(key)
+            if len(subj) > 96:              # truncate on a word boundary
+                subj = subj[:96].rsplit(" ", 1)[0] + "…"
+            tasks.append({
+                "id": t.get("id"), "subject": subj, "status": t.get("status"),
+                "source": t.get("source"), "project": t.get("project"),
+                "ts": t.get("ts"), "priority": t.get("priority"),
+                "prompt_id": t.get("prompt_id")})
+            if len(tasks) >= limit:
+                break
         return json.dumps({
-            "total_matched": len(out),
-            "open": data.get("open"), "completed": data.get("completed"),
-            "by_project": data.get("by_project", {}),
-            "tasks": out[:limit]}, indent=1)
+            "status": status, "project": args.get("project"),
+            "matched": len(matched), "shown": len(tasks),
+            "by_project": by_project, "tasks": tasks}, indent=1)
     raise KeyError(f"unknown tool: {name}")
 
 
