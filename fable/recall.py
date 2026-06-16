@@ -522,3 +522,62 @@ def timeline(db_path: str, since: Optional[str] = None,
                 "by_day": by_day, "threads": threads}
     finally:
         conn.close()
+
+
+def overview(db_path: str, project: Optional[str] = None) -> dict:
+    """Cold-start corpus map — the 'home screen' an agent reads BEFORE searching,
+    so it knows which project/thread to look in. Per work-project: thread count,
+    open tasks, activity span, top technologies + topics, recent card titles;
+    plus global totals and date span. Pass `project` to scope to one."""
+    conn = fdb.connect(db_path)
+    try:
+        where, args = "", []
+        if project:
+            where = "WHERE LOWER(s.project) LIKE ?"
+            args = [f"%{project.lower()}%"]
+        rows = conn.execute(
+            f"SELECT COALESCE(s.project,'?') p, COUNT(DISTINCT t.prompt_id), "
+            f"MIN(t.first_ts), MAX(t.last_ts), COALESCE(SUM(t.est_tokens),0) "
+            f"FROM threads t JOIN sessions s ON s.session_id = t.session_id "
+            f"{where} GROUP BY p ORDER BY 2 DESC", args).fetchall()
+        from fable import tasktime
+        open_by: dict = {}
+        for tt in tasktime.read(db_path).get("tasks", []):
+            if tt.get("drifted") and tt.get("status") in (
+                    "pending", "in_progress"):
+                k = tt.get("project") or "?"
+                open_by[k] = open_by.get(k, 0) + 1
+
+        def _top(p, fam, n=5):
+            return [v for (v,) in conn.execute(
+                "SELECT tt.value FROM thread_tags tt JOIN threads th "
+                "ON th.prompt_id = tt.prompt_id JOIN sessions s "
+                "ON s.session_id = th.session_id WHERE s.project = ? "
+                "AND tt.family = ? GROUP BY tt.value "
+                "ORDER BY COUNT(*) DESC LIMIT ?", (p, fam, n))]
+
+        projects = []
+        for p, threads, first, last, tok in rows:
+            recent = [r0 for (r0,) in conn.execute(
+                "SELECT c.title FROM cards c JOIN threads th "
+                "ON th.prompt_id = c.prompt_id JOIN sessions s "
+                "ON s.session_id = th.session_id WHERE s.project = ? "
+                "AND c.title IS NOT NULL ORDER BY th.last_ts DESC LIMIT 5",
+                (p,))]
+            projects.append({
+                "name": p, "threads": threads,
+                "open_tasks": open_by.get(p, 0),
+                "first_active": first, "last_active": last, "est_tokens": tok,
+                "top_technologies": _top(p, "technology"),
+                "top_topics": _top(p, "topic"), "recent_titles": recent})
+        firsts = [p["first_active"] for p in projects if p["first_active"]]
+        lasts = [p["last_active"] for p in projects if p["last_active"]]
+        return {
+            "totals": {"projects": len(projects),
+                       "threads": sum(p["threads"] for p in projects),
+                       "open_tasks": sum(p["open_tasks"] for p in projects)},
+            "span": {"first": min(firsts) if firsts else None,
+                     "last": max(lasts) if lasts else None},
+            "projects": projects}
+    finally:
+        conn.close()

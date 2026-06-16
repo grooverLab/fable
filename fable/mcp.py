@@ -300,6 +300,24 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "fable_overview",
+        "description": (
+            "ORIENT FIRST — the cold-start map of the whole archive. Call at "
+            "the START of a task when you don't yet know which project or "
+            "thread holds what you need, instead of guessing with several "
+            "searches. Returns, per work-project: thread count, open tasks, "
+            "activity span, top technologies + topics, and recent card titles; "
+            "plus global totals and date span. Pass `project` to drill into "
+            "one."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description":
+                            "scope to one work-project (substring match)"},
+            },
+        },
+    },
 ]
 
 
@@ -385,14 +403,42 @@ def _call_tool(db_path, name, args):
                                  limit=int(args.get("limit", 40))))
         return json.dumps(rows, indent=1)
     if name == "fable_file_history":
+        from fable import db as _fdb
         from fable.filetime import file_events, reconstruct
         versions = reconstruct(file_events(db_path, args["path"]))
+        # WHY each edit happened — pair every version with the card of the
+        # thread that produced it (title/decision/outcome/tags): the SAME
+        # what-changed-why correlation the dashboard file-story shows, which the
+        # MCP wasn't passing through. fable owns the transcript, so it uniquely
+        # knows the rationale; prompt_id stays the drill-down handle.
+        pids = tuple({v.get("prompt_id") for v in versions if v.get("prompt_id")})
+        why = {}
+        if pids:
+            conn = _fdb.connect(db_path)
+            try:
+                qs = ",".join("?" * len(pids))
+                for pid, title, typ, outcome, dec in conn.execute(
+                        f"SELECT prompt_id, title, type, outcome, decisions "
+                        f"FROM cards WHERE prompt_id IN ({qs})", pids):
+                    try:
+                        decisions = json.loads(dec or "[]")
+                    except (ValueError, TypeError):
+                        decisions = []
+                    tags = ["%s:%s" % (f, val) for f, val in conn.execute(
+                        "SELECT family, value FROM thread_tags "
+                        "WHERE prompt_id = ? ORDER BY family", (pid,))]
+                    why[pid] = {"title": title, "type": typ,
+                                "outcome": outcome, "decisions": decisions,
+                                "tags": tags}
+            finally:
+                conn.close()
         return json.dumps([
             {"i": i, "ts": v.get("ts"), "tool": v.get("tool"),
              "ok": v.get("ok"), "derived": bool(v.get("derived")),
              "note": v.get("note"), "bytes": v.get("bytes"),
              "session_id": v.get("session_id"),
-             "prompt_id": v.get("prompt_id")}
+             "prompt_id": v.get("prompt_id"),
+             "why": why.get(v.get("prompt_id"))}
             for i, v in enumerate(versions)], indent=1)
     if name == "fable_file_diff":
         from fable.filetime import file_events, reconstruct, file_diff
@@ -430,6 +476,10 @@ def _call_tool(db_path, name, args):
         finally:
             conn.close()
         return json.dumps(out, indent=1)
+    if name == "fable_overview":
+        from fable.recall import overview
+        return json.dumps(overview(db_path, project=args.get("project")),
+                          indent=1)
     if name == "fable_decisions":
         from fable.recall import search
         hits = search(db_path, args["query"], project=args.get("project"),
