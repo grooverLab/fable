@@ -952,8 +952,30 @@ def post_tasks_meta(db_path, body):
     return {"ok": True, "removed": int(removed or 0), "priority": priority}
 
 
+def api_rules(db_path, params):
+    """Auto-Rules — clustered directive-rules (Phase 1: detect + approve).
+    Re-clusters on read so candidates surface live as the carder writes
+    directives; triage status persists across re-clusters."""
+    from fable import rules
+    rules.recluster(db_path)
+    return rules.read_rules(db_path, include_subthreshold=bool(params.get("all")))
+
+
+def post_rules_triage(db_path, body):
+    """Approve / reject / mute / edit one rule (persists across re-clustering)."""
+    from fable import rules
+    return rules.triage(db_path, body.get("id"), body.get("action"),
+                        text=body.get("text"), scope=body.get("scope"))
+
+
+def post_rules_recluster(db_path, body):
+    from fable import rules
+    return rules.recluster(db_path)
+
+
 ROUTES = {
     "/api/stats": api_stats,
+    "/api/rules": api_rules,
     "/api/tasks": api_tasks,
     "/api/projects": api_projects,
     "/api/search": api_search,
@@ -1842,6 +1864,8 @@ POST_ROUTES["/api/tags/blacklist"] = post_tags_blacklist
 POST_ROUTES["/api/tags/autopromote"] = post_tags_autopromote
 POST_ROUTES["/api/tasks/rebuild"] = post_tasks_rebuild
 POST_ROUTES["/api/tasks/meta"] = post_tasks_meta
+POST_ROUTES["/api/rules/triage"] = post_rules_triage
+POST_ROUTES["/api/rules/recluster"] = post_rules_recluster
 ROUTES["/api/backfill"] = api_backfill_progress
 
 

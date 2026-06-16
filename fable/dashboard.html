@@ -372,6 +372,7 @@ button.danger:hover{background:#ff8557}
     <button class="tab" data-tab="cards" title="Cards — AI summaries"><i>▦</i><span>CARDS</span></button>
     <button class="tab" data-tab="triage" title="Triage — review &amp; promote invented tags"><i>⊺</i><span>TRIAGE</span></button>
     <button class="tab" data-tab="tasks" title="Tasks — the durable backlog &amp; drift across every session"><i>☑</i><span>TASKS</span></button>
+    <button class="tab" data-tab="rules" title="Rules — standing directives you repeat, clustered &amp; approved"><i>⚖</i><span>RULES</span></button>
     <button class="tab" data-tab="prune" title="Prune — slim a session"><i>⚗</i><span>PRUNE</span></button>
     <button class="tab" data-tab="compose" title="Compose / Loom"><i>⊞</i><span>LOOM</span><span class="tabbadge" id="bk-count" style="display:none"></span></button>
     <button class="tab" data-tab="graph" title="Graph"><i>◌</i><span>GRAPH</span></button>
@@ -673,6 +674,7 @@ button.danger:hover{background:#ff8557}
     <section id="view-cards" style="display:none"><div class="loading">loading cards…</div></section>
     <section id="view-triage" style="display:none"><div class="loading">loading triage…</div></section>
     <section id="view-tasks" style="display:none"><div class="loading">reconstructing the backlog…</div></section>
+    <section id="view-rules" style="display:none"><div class="loading">clustering rules…</div></section>
 
     <section id="view-costs" style="display:none"><div class="loading">computing telemetry…</div></section>
 
@@ -767,13 +769,14 @@ function showTab(name){
   activeTab=name;
   if($("#bb-tab"))$("#bb-tab").textContent=name;
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
-  for(const v of ["search","thread","compose","graph","editor","prune","files","cards","triage","tasks","costs","settings","stats","logs"])
+  for(const v of ["search","thread","compose","graph","editor","prune","files","cards","triage","tasks","rules","costs","settings","stats","logs"])
     $("#view-"+v).style.display="none";
   $("#view-"+(name==="search"&&currentThread==="open"?"thread":name)).style.display="";
   if(name==="compose")renderLoom();
   if(name==="cards")loadCards();
   if(name==="triage")loadTriage();
   if(name==="tasks")loadTasks();
+  if(name==="rules")loadRules();
   if(name==="stats")loadStats();
   if(name==="logs")loadLogs();
   if(name==="graph"){loadGraph().then(()=>{
@@ -2038,6 +2041,59 @@ async function autoPromote(){
 function refreshTriage(){
   if($("#view-triage")&&$("#view-triage").style.display!=="none")loadTriage();
   else if($("#dash-tags"))loadTagPanel();
+}
+
+/* ── Rules tab: auto-mined directive-rules (rules.py) ── */
+let RULES_DATA=null, RULES_F={status:"candidate",src:null};
+const RSTAT={candidate:["○","var(--cyan)"],active:["✓","var(--green)"],
+  muted:["◌","var(--dim)"],rejected:["✗","var(--faint)"],subthreshold:["·","var(--faint)"]};
+async function loadRules(force){
+  const v=$("#view-rules");
+  if(!RULES_DATA||force){v.innerHTML='<div class="loading">clustering directive-rules…</div>';
+    RULES_DATA=await api("/api/rules?all=1").catch(()=>null);}
+  renderRules();
+}
+function ruleFilter(k,val){RULES_F[k]=val;renderRules();}
+async function ruleTriage(id,action,extra){
+  await fetch("/api/rules/triage",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(Object.assign({id:id,action:action},extra||{}))}).then(r=>r.json());
+  RULES_DATA=await api("/api/rules?all=1").catch(()=>RULES_DATA); renderRules();
+}
+async function rulesRecluster(){
+  $("#view-rules").innerHTML='<div class="loading">re-clustering from the latest cards…</div>';
+  await fetch("/api/rules/recluster",{method:"POST"}).then(r=>r.json());
+  RULES_DATA=await api("/api/rules?all=1"); renderRules();
+}
+function renderRules(){
+  const v=$("#view-rules"), d=RULES_DATA, f=RULES_F;
+  if(!d){v.innerHTML='<div class="empty">could not load rules</div>';return;}
+  const bs=d.by_status||{}, sc=d.sources||{};
+  let rs=d.rules.filter(r=>(!f.status||r.status===f.status)&&(!f.src||r.source===f.src));
+  const pill=(k,lbl)=>`<span class="bf-btn" style="${f.status===k?'background:var(--phos);color:#04130c;border-color:var(--phos)':''}" onclick="ruleFilter('status',${k?`'${k}'`:'null'})">${lbl}${k&&bs[k]?' '+bs[k]:''}</span>`;
+  const spill=(k,lbl)=>`<span class="bf-btn" style="${(f.src||null)===k?'background:var(--cyan);color:#04130c;border-color:var(--cyan)':''}" onclick="ruleFilter('src',${k?`'${k}'`:'null'})">${lbl}${k&&sc[k]?' '+sc[k]:''}</span>`;
+  const row=r=>{const s=RSTAT[r.status]||RSTAT.subthreshold, ev=(r.evidence||[])[0];
+    return `<div class="genwrap" style="margin-bottom:7px;padding:10px 12px;display:flex;align-items:flex-start;gap:10px">
+      <div style="flex:1;min-width:0">
+        <div style="color:var(--text);font-size:13px">${esc(r.display_text||r.canonical_text)}</div>
+        <div class="hint" style="margin-top:4px">
+          <span style="color:${s[1]}">${s[0]} ${esc(r.status)}</span> · <b>${esc(r.source)}</b> ·
+          seen <b>${r.occurrence_count}×</b> · ${r.session_count} sessions · ${r.project_count} ${r.project_count===1?'project':'projects'} ·
+          <span class="badge">${esc(r.scope)}${r.project?':'+esc(r.project):''}</span>
+          ${ev?` · <span style="cursor:pointer;color:var(--cyan)" onclick="openThread('${ev}')">evidence ↗</span>`:''}
+        </div></div>
+      <div style="display:flex;gap:5px;white-space:nowrap">
+        ${r.status!=='active'?`<span class="bf-btn" title="approve → standing rule" onclick="ruleTriage(${r.id},'approve')" style="color:var(--green)">✓ keep</span>`:''}
+        ${r.status!=='muted'?`<span class="bf-btn" title="mute (keep, don't inject)" onclick="ruleTriage(${r.id},'mute')">◌</span>`:''}
+        ${r.status!=='rejected'?`<span class="bf-btn" title="reject (never resurface)" onclick="ruleTriage(${r.id},'reject')" style="color:var(--ember)">✗</span>`:''}
+      </div></div>`;};
+  v.innerHTML=`<div style="margin-bottom:12px"><b style="color:var(--phos);font:600 16px var(--serif)">Rules</b>
+      <span class="hint"> · standing directives you've repeated, clustered — approve to make them stick (automates /remember)</span>
+      <span class="bf-btn" style="float:right" onclick="rulesRecluster()">↻ re-cluster</span></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+      ${pill('candidate','candidates')}${pill('active','active')}${pill('muted','muted')}${pill('rejected','rejected')}${pill(null,'all')}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+      ${spill(null,'all sources')}${spill('directive','directives')}${spill('lesson','lessons')}${spill('gotcha','gotchas')}</div>
+    <div class="results">${rs.map(row).join("")||'<div class="empty">no rules here yet — run the re-card to populate directives, then candidates surface (≥3× across ≥2 sessions)</div>'}</div>`;
 }
 
 /* ── Tasks tab: the durable backlog (tasktime) ── */

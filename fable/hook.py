@@ -218,8 +218,41 @@ def _tail_index(db_path, transcript):
         from fable.extract import fts_extract_fn
         from fable.indexer import index_live_tail
         index_live_tail(db_path, transcript, extract_fn=fts_extract_fn)
+        _ensure_session_row(db_path, transcript)
     except Exception as e:
         _log(db_path, f"tail-index failed: {e}")
+
+
+def _ensure_session_row(db_path, transcript):
+    """Register the live session in the sidebar. The tail-index writes the turns,
+    but the `sessions` row that api_projects lists was discover-only — so a new
+    project's session was searchable yet invisible in the tree until a discover
+    ran. Create it the moment it's indexed; never clobber a discover-built row."""
+    import datetime
+    from fable import db as fdb
+    from fable.discover import session_title, project_label
+    sid = os.path.basename(transcript)
+    if sid.endswith(".jsonl"):
+        sid = sid[:-6]
+    conn = fdb.connect(db_path)
+    try:
+        if conn.execute("SELECT 1 FROM sessions WHERE session_id=?",
+                        (sid,)).fetchone():
+            # existing (maybe an orphan-vault row) — just ensure live_path is set
+            conn.execute(
+                "UPDATE sessions SET live_path=COALESCE(live_path, ?) "
+                "WHERE session_id=? AND (live_path IS NULL OR live_path='')",
+                (transcript, sid))
+        else:
+            proj = project_label(os.path.basename(os.path.dirname(transcript)))
+            conn.execute(
+                "INSERT INTO sessions(session_id, project, title, live_path,"
+                " indexed_at) VALUES(?,?,?,?,?)",
+                (sid, proj, session_title(transcript), transcript,
+                 datetime.datetime.now(datetime.timezone.utc).isoformat()))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 _EXTERNALIZE = (

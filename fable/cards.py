@@ -48,6 +48,10 @@ these fields:
            recur; one concise sentence each (empty list if none)
   "open_questions": substantive questions raised but left unresolved / TBD
            (empty list if none)
+  "directives": standing rules or preferences the USER stated for how they want
+           work done — judged by meaning, in any phrasing or language; each a
+           concise imperative. Only what the user instructed (NOT what you
+           decided, and NOT what was learned). Empty list if none.
   "files": file paths or components touched (empty list if none)
   "outcome": one line: how the thread ended (done/abandoned/blocked/...)
   "summary": 2-4 sentences, concrete, naming real identifiers
@@ -103,6 +107,7 @@ def parse_card(text: str) -> dict:
         "lessons": [str(x) for x in obj.get("lessons") or []],
         "gotchas": [str(x) for x in obj.get("gotchas") or []],
         "open_questions": [str(x) for x in obj.get("open_questions") or []],
+        "directives": [str(x) for x in obj.get("directives") or []],
         "files": [str(f) for f in obj.get("files") or []],
         "outcome": str(obj.get("outcome", "")).strip(),
         "summary": str(obj.get("summary", "")).strip(),
@@ -119,15 +124,21 @@ def store_card(conn, prompt_id: str, card: dict, source: str, model: str,
     conn.execute(
         "INSERT OR REPLACE INTO cards(prompt_id, title, type, topics,"
         " decisions, ideas, features, lessons, gotchas, open_questions,"
-        " files, outcome, summary, est_tokens, source, model,"
-        " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " directives, files, outcome, summary, est_tokens, source, model,"
+        " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (prompt_id, card["title"], card["type"],
          json.dumps(card["topics"]), json.dumps(card["decisions"]),
          json.dumps(card["ideas"]), json.dumps(card["features"]),
          json.dumps(card["lessons"]), json.dumps(card["gotchas"]),
-         json.dumps(card["open_questions"]),
+         json.dumps(card["open_questions"]), json.dumps(card["directives"]),
          json.dumps(card["files"]), card["outcome"], card["summary"],
          est_tokens, source, model, now))
+    # the card's semantic vector is now stale (its content just changed); drop
+    # it so the next embed pass regenerates it — a re-card never silently leaves
+    # a stale card vector, and the row becomes "pending" again for `fable embed`.
+    conn.execute(
+        "DELETE FROM embeddings WHERE prompt_id = ? AND kind = 'card'",
+        (prompt_id,))
     # thread-level tags (controlled dims + semantic families): a secondary
     # facet over FTS. Re-written wholesale so re-carding stays idempotent.
     tags = card.get("tags") or []
@@ -150,6 +161,7 @@ def store_card(conn, prompt_id: str, card: dict, source: str, model: str,
                     " ".join(card["ideas"]), " ".join(card["features"]),
                     " ".join(card["lessons"]), " ".join(card["gotchas"]),
                     " ".join(card["open_questions"]),
+                    " ".join(card["directives"]),
                     " ".join(t[1] for t in tags)]),
          f"card:{prompt_id}", prompt_id, "card"))
     conn.commit()

@@ -18,6 +18,14 @@ CHARS_PER_TOKEN = 4
 MIN_ELIDED_CHARS = 80
 BUDGET_SLACK = 1.5  # hard output cap = budget chars * slack
 
+# Search confidence: score_pct is an ABSOLUTE, saturating function of the raw
+# BM25×weight score — NOT normalized within the returned batch — so a weak
+# query's best-of-a-bad-lot no longer reads 100%. _SCORE_HALF is the raw score
+# at which confidence = 50%; below _LOW_CONF_PCT a hit is flagged low_confidence
+# (FTS5 always returns *something*, so a consumer needs a "this is noise" signal).
+_SCORE_HALF = 150.0
+_LOW_CONF_PCT = 40
+
 
 class StaleIndexError(RuntimeError):
     pass
@@ -286,8 +294,10 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
             raise ValueError(f"unsupported search query {query!r}: {e}")
 
         # hybrid: card-embedding cosine matches merge in, scaled to the FTS
-        # score ceiling so they can actually compete (graceful off)
-        if fts_query is not None:
+        # score ceiling so they can actually compete (graceful off). NOT when a
+        # prompt-level SQL filter (tag/operative/target) is active — the booster
+        # runs after that SQL, so it would leak unfiltered prompts past the facet.
+        if fts_query is not None and not (tag or operative or target):
             try:
                 from fable.embeddings import semantic_hits
                 have = {h[0] for h in hits}
@@ -304,7 +314,10 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
                 "SELECT turn_count, est_tokens, first_ts, last_ts,"
                 " session_id, sidechain_turns, models "
                 "FROM threads WHERE prompt_id = ?",
-                (prompt_id,)).fetchone() or (None,) * 7
+                (prompt_id,)).fetchone()
+            if meta is None:
+                continue  # ghost: an fts entry whose thread was pruned away —
+                #            never surface an all-null record to the consumer
             card = conn.execute(
                 "SELECT title, type, outcome, decisions FROM cards "
                 "WHERE prompt_id = ?",
@@ -348,12 +361,14 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
         if session:
             results = [h for h in results
                        if (h["session_id"] or "").startswith(session)]
-        # normalize the unbounded BM25×weight (+cosine) sum into an honest
-        # 0-100, top hit = 100, so the number is comparable across queries
-        if fts_query is not None and results:
-            top = max((h["score"] or 0) for h in results) or 1
+        # absolute, saturating confidence — NOT batch-relative — so a weak
+        # query's best hit reads ~low, not 100%, and is comparable across
+        # queries. low_confidence: a hit a consumer should not anchor on.
+        if fts_query is not None:
             for h in results:
-                h["score_pct"] = round(100 * (h["score"] or 0) / top)
+                s = h["score"] or 0
+                h["score_pct"] = round(100 * s / (s + _SCORE_HALF))
+                h["low_confidence"] = h["score_pct"] < _LOW_CONF_PCT
         results.sort(key=SORT_KEYS.get(sort, SORT_KEYS["relevance"]),
                      reverse=(sort == "recent"))
         fdb.log_op(db_path, "search", q=query or "", hits=len(results[:limit]))

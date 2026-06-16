@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS cards(
   lessons TEXT,
   gotchas TEXT,
   open_questions TEXT,
+  directives TEXT,
   files TEXT,
   outcome TEXT,
   summary TEXT,
@@ -211,7 +212,8 @@ def connect(path: str, create: bool = False) -> sqlite3.Connection:
                 "ALTER TABLE cards ADD COLUMN features TEXT",
                 "ALTER TABLE cards ADD COLUMN lessons TEXT",
                 "ALTER TABLE cards ADD COLUMN gotchas TEXT",
-                "ALTER TABLE cards ADD COLUMN open_questions TEXT"):
+                "ALTER TABLE cards ADD COLUMN open_questions TEXT",
+                "ALTER TABLE cards ADD COLUMN directives TEXT"):
         try:
             conn.execute(ddl)
         except sqlite3.OperationalError:

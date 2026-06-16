@@ -21,6 +21,38 @@ from fable.jsonl import read_span
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
 
+def _path_match(target: str, query: str) -> bool:
+    """True when target and query name the same file: exact, or either is a
+    path-tail of the other — so vix.rs / crates/…/vix.rs / /abs/…/vix.rs all
+    match each other. Path-boundary aware, so myvix.rs ≠ vix.rs."""
+    if not target or not query:
+        return False
+    t, q = target.lstrip("/"), query.lstrip("/")
+    return t == q or t.endswith("/" + q) or q.endswith("/" + t)
+
+
+def _canonical_map(paths) -> dict:
+    """Map each path to its canonical key: a relative path folds into the UNIQUE
+    absolute path it is a tail of, so the same file is not listed under three
+    keys. Absolute or ambiguous paths stay as themselves."""
+    from collections import defaultdict
+    by_base = defaultdict(list)
+    for p in paths:
+        if p.startswith("/"):
+            by_base[p.rsplit("/", 1)[-1]].append(p)
+    out = {}
+    for p in paths:
+        key = p
+        if not p.startswith("/"):
+            pl = p.lstrip("/")
+            cands = [a for a in by_base.get(p.rsplit("/", 1)[-1], [])
+                     if a.lstrip("/") == pl or a.lstrip("/").endswith("/" + pl)]
+            if len(cands) == 1:
+                key = cands[0]
+        out[p] = key
+    return out
+
+
 def _fts_candidates(conn, path_query: str) -> List[str]:
     """Narrow 100k+ records to the few that mention the path. FTS tokenizes
     paths on punctuation, so match on the path's distinctive tokens."""
@@ -66,9 +98,7 @@ def _checkpoint_events(path_query: str) -> List[dict]:
             except ValueError:
                 continue
             target = e.get("path") or ""
-            if not (target == path_query
-                    or target.endswith("/" + path_query.lstrip("/"))
-                    or target.endswith(path_query)):
+            if not _path_match(target, path_query):
                 continue
             bpath = os.path.join(os.path.dirname(log), e.get("file") or "")
             if not os.path.exists(bpath):
@@ -110,9 +140,7 @@ def _snapshot_events(conn, path_query: str) -> List[dict]:
             continue
         backups = (obj.get("snapshot") or {}).get("trackedFileBackups") or {}
         for target, info in backups.items():
-            if not (target == path_query
-                    or target.endswith("/" + path_query.lstrip("/"))
-                    or target.endswith(path_query)):
+            if not _path_match(target, path_query):
                 continue
             if not isinstance(info, dict) or not info.get("backupFileName"):
                 continue
@@ -174,9 +202,7 @@ def file_events(db_path: str, path_query: str) -> List[dict]:
                     if not isinstance(inp, dict):
                         continue
                     target = inp.get("file_path") or inp.get("path") or ""
-                    if not (target == path_query
-                            or target.endswith("/" + path_query.lstrip("/"))
-                            or target.endswith(path_query)):
+                    if not _path_match(target, path_query):
                         continue
                     name = block.get("name")
                     if name in EDIT_TOOLS:
@@ -423,14 +449,23 @@ def known_files(db_path: str, query: str = "", limit: int = 40) -> List[dict]:
     looks-like-a-path), ranked by mention count."""
     conn = fdb.connect(db_path)
     try:
-        rows = conn.execute("""
-            SELECT term, SUM(count) AS n FROM terms
-            WHERE kind='target' AND (term LIKE '%/%' OR term LIKE '%.%')
-            AND term LIKE ? GROUP BY term ORDER BY n DESC LIMIT ?""",
-            (f"%{query}%", limit)).fetchall()
-        return [{"path": t, "mentions": n} for t, n in rows]
+        rows = conn.execute(
+            "SELECT term, SUM(count) AS n FROM terms "
+            "WHERE kind='target' AND (term LIKE '%/%' OR term LIKE '%.%') "
+            "GROUP BY term").fetchall()
     finally:
         conn.close()
+    # fold representations of the same file onto one canonical path
+    cmap = _canonical_map([t for t, _ in rows])
+    merged: dict = {}
+    for t, n in rows:
+        k = cmap[t]
+        merged[k] = merged.get(k, 0) + n
+    q = query.lower()
+    out = [{"path": p, "mentions": n} for p, n in merged.items()
+           if q in p.lower()]
+    out.sort(key=lambda x: -x["mentions"])
+    return out[:limit]
 
 
 def session_files(db_path: str, session_id: str) -> List[dict]:
