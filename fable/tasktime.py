@@ -235,7 +235,7 @@ def ledger(db_path):
                 "id": c["task_id"], "interp": c.get("_interp", False),
                 "ts": c["ts"], "session": sid, "project": c["project"],
                 "prompt_id": c.get("prompt_id"), "cwd": c.get("cwd"),
-                "subject": desc.splitlines()[0][:90] if desc else "(empty)"})
+                "subject": _clip(desc.splitlines()[0]) if desc else "(empty)"})
 
     # status join: each update applies to the most recent same-(session,id)
     # create at or before it — so a reset's #5 doesn't inherit the old #5.
@@ -386,9 +386,12 @@ def open_for_project(db_path, project, limit=8):
     """Open tasks for the SessionStart reminder (M7). Matched on cwd-project OR
     work-project — Claude Code scopes its task list by the cwd dir, so this
     fires even when you work on project B from project A's directory. Priority
-    first, then most recent. Excludes user-removed. Returns (rows, total)."""
+    first, then most recent. Excludes user-removed. Each row also carries its
+    TRUE work-project so the reminder labels honestly (you sit in project A's
+    cwd but the tasks belong to B/C). Returns (rows, total, by_project) where
+    by_project = {work_project: open_count}."""
     if not project:
-        return [], 0
+        return [], 0, {}
     conn = fdb.connect(db_path)
     try:
         conn.execute(_TASKS_DDL)
@@ -398,13 +401,18 @@ def open_for_project(db_path, project, limit=8):
         join = ("FROM tasks t LEFT JOIN task_meta m "
                 "ON m.session=t.session AND m.task_id=t.task_id")
         rows = conn.execute(
-            f"SELECT t.task_id,t.status,t.subject,m.priority {join} "
+            f"SELECT t.task_id,t.status,t.subject,m.priority,"
+            f"COALESCE(t.project,'?') {join} "
             f"WHERE {where} ORDER BY (m.priority IS NULL), m.priority, "
             f"t.ts DESC LIMIT ?", (project, project, limit)).fetchall()
         total = conn.execute(
             f"SELECT COUNT(*) {join} WHERE {where}",
             (project, project)).fetchone()[0]
-        return rows, total
+        by_project = dict(conn.execute(
+            f"SELECT COALESCE(t.project,'?') p, COUNT(*) {join} "
+            f"WHERE {where} GROUP BY p ORDER BY 2 DESC",
+            (project, project)).fetchall())
+        return rows, total, by_project
     finally:
         conn.close()
 
@@ -424,6 +432,14 @@ def _clean_subject(text: str) -> str:
     s = _ROLE_TAG.sub("", s)
     s = s.replace("**", "").replace("__", "")
     return s.strip(" *_").strip()
+
+
+def _clip(text: str, n: int = 90) -> str:
+    """Truncate a subject on a word boundary (never mid-word) with an ellipsis."""
+    text = (text or "").strip()
+    if len(text) <= n:
+        return text
+    return text[:n].rsplit(" ", 1)[0].rstrip() + "…"
 
 
 def extract_inline(db_path, conn=None):
@@ -458,7 +474,7 @@ def extract_inline(db_path, conn=None):
                 items.append({
                     "session": sid, "prompt_id": pid, "project": proj,
                     "cwd": cwd.get(sid), "ts": ts or "", "task_id": tid,
-                    "subject": text[:90],
+                    "subject": _clip(text),
                     "status": "completed" if checked else "pending",
                     "drifted": 0 if checked else 1})
         return items
@@ -501,7 +517,7 @@ def extract_card_items(db_path, conn=None):
                     items.append({
                         "session": sid, "prompt_id": pid, "project": proj,
                         "cwd": cwd.get(sid), "ts": ts or "", "task_id": tid,
-                        "subject": text[:90], "status": "pending",
+                        "subject": _clip(text), "status": "pending",
                         "drifted": 1, "source": kind[:-1]})    # idea / feature
         return items
     finally:

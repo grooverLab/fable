@@ -235,10 +235,27 @@ SORT_KEYS = {
 
 
 def _time_bounds(since: Optional[str], until: Optional[str]):
-    """Normalize since/until. ISO-8601 sorts lexically, so a date or a full
-    timestamp both compare correctly. A date-only `until` (YYYY-MM-DD) is made
-    INCLUSIVE of that whole day; a date-only `since` is already an inclusive
-    lower bound as-is."""
+    """Validate + normalize since/until. ISO-8601 sorts lexically, so a date or
+    a full timestamp both compare correctly. A date-only `until` (YYYY-MM-DD) is
+    made INCLUSIVE of that whole day; a date-only `since` is already inclusive.
+    A malformed/impossible date raises ValueError (so search and timeline FAIL
+    LOUDLY and consistently, instead of one silently dropping the filter)."""
+    import datetime
+
+    def _check(v, label):
+        if not v:
+            return None
+        v = v.strip()
+        try:                       # validate the date part (catches 2026-13-45,
+            datetime.date.fromisoformat(v[:10])   # 'not-a-date', typos, …)
+        except ValueError:
+            raise ValueError(
+                f"invalid {label} date {v!r} — use YYYY-MM-DD or an ISO "
+                f"timestamp")
+        return v
+
+    since = _check(since, "since")
+    until = _check(until, "until")
     if until and len(until) == 10:
         until = until + "T23:59:59.999Z"
     return since, until
@@ -401,6 +418,14 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
         if session:
             results = [h for h in results
                        if (h["session_id"] or "").startswith(session)]
+        # date window as a POST-filter too (not just SQL): the semantic booster
+        # adds prompt_ids AFTER the SQL date filter, so without this an
+        # out-of-window/inverted range would leak semantic hits. Now search and
+        # timeline agree (inverted/empty window → empty).
+        if since:
+            results = [h for h in results if (h["last_ts"] or "") >= since]
+        if until:
+            results = [h for h in results if (h["first_ts"] or "") <= until]
         # absolute, saturating confidence — NOT batch-relative — so a weak
         # query's best hit reads ~low, not 100%, and is comparable across
         # queries. low_confidence: a hit a consumer should not anchor on.

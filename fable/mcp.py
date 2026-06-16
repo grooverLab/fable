@@ -367,8 +367,10 @@ def _call_tool(db_path, name, args):
         return f"remembered (#{fid}) — will be injected into future sessions"
     if name == "fable_context":
         from fable.contextpack import build_context
-        return build_context(db_path, args["query"],
-                             budget=int(args.get("budget", 12000)),
+        # honor a small/zero budget (0 was falsy → full default pack); floor at
+        # 500 so a tiny budget yields a tiny-but-usable pack, never the full 12k
+        budget = max(int(args.get("budget", 12000)), 500)
+        return build_context(db_path, args["query"], budget=budget,
                              max_threads=int(args.get("max_threads", 5)),
                              project=args.get("project"))
     if name == "fable_recall":
@@ -395,8 +397,14 @@ def _call_tool(db_path, name, args):
     if name == "fable_file_diff":
         from fable.filetime import file_events, reconstruct, file_diff
         versions = reconstruct(file_events(db_path, args["path"]))
-        return "\n".join(
-            file_diff(versions, int(args["a"]), int(args["b"])))
+        n = len(versions)
+        a, b = int(args["a"]), int(args["b"])
+        if not n:
+            return f"no reconstructable versions for {args['path']!r}"
+        if not (0 <= a < n and 0 <= b < n):
+            return (f"version out of range for {args['path']!r}: has {n} "
+                    f"version(s) (0–{n - 1}), got a={a}, b={b}")
+        return "\n".join(file_diff(versions, a, b))
     if name == "fable_tags":
         from fable import db as _fdb
         fam = args.get("family")
