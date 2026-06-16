@@ -23,7 +23,8 @@ TOOLS = [
             "ANY session. PREFER IT over guessing or trusting a compaction "
             "summary (the summary is lossy; this is the exact archive). "
             "Returns ranked threads with ids, turn/token counts, card titles, "
-            "decisions and outcomes; then call fable_thread to read one verbatim."),
+            "decisions and outcomes; then call fable_thread to read one verbatim. "
+            "To trace WHEN a file changed, use fable_files → fable_file_history."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -145,9 +146,12 @@ TOOLS = [
     {
         "name": "fable_context",
         "description": (
-            "Auto-assemble a paste-ready context pack for a task: searches "
-            "the archive, picks the strongest threads, splits the budget "
-            "across them. Returns one sentinel-wrapped block."),
+            "Use when you're ABOUT TO START a task that needs prior context and "
+            "want it assembled ready-to-paste — ONE call instead of fable_search "
+            "+ several fable_thread opens. (fable_search ranks threads for YOU to "
+            "read and pick; fable_context auto-assembles the pack for you.) "
+            "Searches the archive, picks the strongest threads, splits the budget "
+            "across them, returns one sentinel-wrapped block."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -162,10 +166,10 @@ TOOLS = [
     {
         "name": "fable_recall",
         "description": (
-            "Read the durable facts the user stored via /remember (the READ "
-            "side of fable_remember) — lasting preferences, decisions and "
-            "constraints, the same ones auto-injected at session start. Call "
-            "to re-check what the user has committed to before assuming. "
+            "Use DEEP IN A LONG SESSION when the start-of-session fact injection "
+            "has scrolled out of context, or to re-check a stored preference / "
+            "constraint before assuming. Reads the durable facts the user saved "
+            "via /remember — lasting preferences, decisions and constraints. "
             "Optionally scope to a project."),
         "inputSchema": {
             "type": "object",
@@ -240,6 +244,34 @@ TOOLS = [
                 "family": {"type": "string", "description":
                            "omit to list families; pass one (e.g. 'topic') "
                            "to list its tag values"},
+            },
+        },
+    },
+    {
+        "name": "fable_tasks",
+        "description": (
+            "READ THE USER'S BACKLOG — the durable task ledger mined from every "
+            "session's Task tool calls + inline checkbox todos. Use when the user "
+            "asks what's pending / open / left to do, to pick the next task, or to "
+            "check whether something is already tracked before adding it. Tasks "
+            "carry their TRUE work-project (derived from the files a session "
+            "touched, not its cwd), so a project filter is meaningful even for "
+            "cross-project sessions. Returns a per-work-project summary + the "
+            "matching tasks (id, subject, status, source, project, and a "
+            "prompt_id for provenance via fable_thread). Read-only."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description":
+                            "filter to one work-project (substring match)"},
+                "status": {"type": "string",
+                           "enum": ["open", "completed", "all"],
+                           "description":
+                           "default 'open' (raised but never completed)"},
+                "source": {"type": "string",
+                           "enum": ["task", "inline", "idea", "feature"],
+                           "description": "filter by where the task came from"},
+                "limit": {"type": "integer", "default": 30},
             },
         },
     },
@@ -365,6 +397,31 @@ def _call_tool(db_path, name, args):
         finally:
             conn.close()
         return json.dumps(out, indent=1)
+    if name == "fable_tasks":
+        from fable import tasktime
+        data = tasktime.read(db_path)
+        proj = (args.get("project") or "").lower()
+        status = args.get("status", "open")
+        source = args.get("source")
+        limit = int(args.get("limit", 30))
+        out = []
+        for t in data.get("tasks", []):
+            if status == "open" and not t.get("drifted"):
+                continue
+            if status == "completed" and t.get("status") != "completed":
+                continue
+            if source and (t.get("source") or "task") != source:
+                continue
+            if proj and proj not in (t.get("project") or "").lower():
+                continue
+            out.append({k: t.get(k) for k in
+                        ("id", "subject", "status", "source", "project",
+                         "ts", "prompt_id", "priority")})
+        return json.dumps({
+            "total_matched": len(out),
+            "open": data.get("open"), "completed": data.get("completed"),
+            "by_project": data.get("by_project", {}),
+            "tasks": out[:limit]}, indent=1)
     raise KeyError(f"unknown tool: {name}")
 
 

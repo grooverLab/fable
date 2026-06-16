@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/fable-recall-header@2x.png" alt="fable Recall — verbatim session memory: every Claude Code session, indexed byte-for-byte, searchable in milliseconds" width="100%"/>
+
 # fable Recall
 
 ## Your Claude already has a memory. fable unlocks it.
