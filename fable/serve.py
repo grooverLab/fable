@@ -956,8 +956,9 @@ def api_rules(db_path, params):
     """Auto-Rules — clustered directive-rules (Phase 1: detect + approve).
     Re-clusters on read so candidates surface live as the carder writes
     directives; triage status persists across re-clusters."""
+    from fable import db as _fdb
     from fable import rules
-    rules.recluster(db_path)
+    _fdb.write_retry(lambda: rules.recluster(db_path))
     return rules.read_rules(db_path, include_subthreshold=bool(params.get("all")))
 
 
@@ -969,8 +970,9 @@ def post_rules_triage(db_path, body):
 
 
 def post_rules_recluster(db_path, body):
+    from fable import db as _fdb
     from fable import rules
-    return rules.recluster(db_path)
+    return _fdb.write_retry(lambda: rules.recluster(db_path))
 
 
 ROUTES = {
@@ -2000,25 +2002,42 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-_DISCOVER_INTERVAL = 20  # seconds; unchanged files are skipped, so idle ≈ free
+_DISCOVER_INTERVAL = 20  # seconds; cheap file-set check each tick
+
+
+def _project_files():
+    import glob
+    import os
+    from fable.discover import DEFAULT_PROJECTS_DIR
+    try:
+        return set(glob.glob(os.path.join(DEFAULT_PROJECTS_DIR, "*", "*.jsonl")))
+    except OSError:
+        return set()
 
 
 def _discover_loop(db_path):
-    """Keep the Map fresh while serving: incremental discover on a timer, so a
-    brand-new project/session in ~/.claude/projects shows up in the sidebar with
-    no manual `fable discover` and no separate `watch` daemon. Runs once
-    immediately (catches anything indexed-but-unregistered or never-indexed),
-    then every _DISCOVER_INTERVAL. Incremental — unchanged files are skipped, so
-    idle cycles cost ~nothing; a failed cycle is silently retried and never
-    takes the server down."""
+    """Keep the Map fresh while serving WITHOUT pegging a core. A brand-new
+    project/session in ~/.claude/projects gets indexed automatically, but the
+    EXPENSIVE part — discover() runs a full-corpus index_terms rebuild every
+    time — fires ONLY when a new session FILE appears, not every tick. (The old
+    version called discover() every 20s, so it rebuilt all terms every 20s and
+    pinned the serve process at ~95% CPU, starving the live carder.) Existing
+    sessions' incremental growth is handled by the live tail-index hook;
+    embed_cards runs each tick but is a no-op unless the carder made new cards."""
     import time as _t
+    seen = _project_files()
+    boot = True
     while True:
         try:
-            from fable.discover import discover
-            discover(db_path)
+            now = _project_files()
+            if boot or (now - seen):          # only on a NEW session file
+                from fable.discover import discover
+                discover(db_path)
+                seen = now
+                boot = False
             from fable.embeddings import embed_cards, backend
             if backend():
-                embed_cards(db_path)
+                embed_cards(db_path)          # incremental; no-op when nothing new
         except Exception:
             pass
         _t.sleep(_DISCOVER_INTERVAL)

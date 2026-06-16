@@ -189,6 +189,23 @@ CREATE TABLE IF NOT EXISTS embeddings(
 """
 
 
+def write_retry(fn, *, attempts: int = 6, base: float = 0.05):
+    """Run a DB-writing callable, retrying on a transient 'database is locked'.
+    WAL serializes writers and busy_timeout handles most contention; this is the
+    belt-and-suspenders for the rest under heavy multi-session write load. Any
+    non-lock error propagates immediately; the lock error re-raises after the
+    final attempt. Wrap user-triggered writes (recluster, task meta, …) so a
+    momentary collision returns gracefully instead of 500-ing."""
+    import time
+    for i in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower() or i == attempts - 1:
+                raise
+            time.sleep(base * (2 ** i))   # 0.05, 0.1, 0.2, 0.4, 0.8, 1.6s
+
+
 def connect(path: str, create: bool = False) -> sqlite3.Connection:
     """Open the Map. Read paths must not silently create an empty index —
     pass create=True only from index/discover."""
@@ -204,7 +221,10 @@ def connect(path: str, create: bool = False) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    # WAL = many readers + one writer; writers serialize. 20s gives a waiting
+    # writer plenty of room to acquire the lock under heavy multi-session load
+    # (paired with chunked bulk writes so no writer holds it for seconds).
+    conn.execute("PRAGMA busy_timeout=20000")
     conn.executescript(SCHEMA)
     for ddl in ("ALTER TABLE sessions ADD COLUMN pinned INTEGER DEFAULT 0",
                 "ALTER TABLE sessions ADD COLUMN tags TEXT",
@@ -213,11 +233,26 @@ def connect(path: str, create: bool = False) -> sqlite3.Connection:
                 "ALTER TABLE cards ADD COLUMN lessons TEXT",
                 "ALTER TABLE cards ADD COLUMN gotchas TEXT",
                 "ALTER TABLE cards ADD COLUMN open_questions TEXT",
-                "ALTER TABLE cards ADD COLUMN directives TEXT"):
+                "ALTER TABLE cards ADD COLUMN directives TEXT",
+                "ALTER TABLE cards ADD COLUMN card_gen INTEGER DEFAULT 1"):
         try:
             conn.execute(ddl)
         except sqlite3.OperationalError:
             pass  # column already exists
+    # one-time: cards that already carry the latest schema (directives present)
+    # were re-carded under the current generation — mark them gen 2 so a
+    # RESUMABLE re-card skips them instead of redoing them. Guarded so it runs
+    # once; cards missing directives stay gen 1 and get regenerated.
+    try:
+        if not conn.execute(
+                "SELECT 1 FROM meta WHERE key='cardgen2_backfilled'").fetchone():
+            conn.execute("UPDATE cards SET card_gen=2 "
+                         "WHERE card_gen < 2 AND directives IS NOT NULL")
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) "
+                         "VALUES('cardgen2_backfilled', '1')")
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
     # migrate the embeddings table to the composite (prompt_id, kind) key so
     # card- and thread-vectors can coexist; existing rows become kind='card'
     try:

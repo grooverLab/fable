@@ -125,14 +125,14 @@ def store_card(conn, prompt_id: str, card: dict, source: str, model: str,
         "INSERT OR REPLACE INTO cards(prompt_id, title, type, topics,"
         " decisions, ideas, features, lessons, gotchas, open_questions,"
         " directives, files, outcome, summary, est_tokens, source, model,"
-        " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " created_at, card_gen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (prompt_id, card["title"], card["type"],
          json.dumps(card["topics"]), json.dumps(card["decisions"]),
          json.dumps(card["ideas"]), json.dumps(card["features"]),
          json.dumps(card["lessons"]), json.dumps(card["gotchas"]),
          json.dumps(card["open_questions"]), json.dumps(card["directives"]),
          json.dumps(card["files"]), card["outcome"], card["summary"],
-         est_tokens, source, model, now))
+         est_tokens, source, model, now, CARDER_GEN))
     # the card's semantic vector is now stale (its content just changed); drop
     # it so the next embed pass regenerates it — a re-card never silently leaves
     # a stale card vector, and the row becomes "pending" again for `fable embed`.
@@ -191,6 +191,12 @@ def generate_card(db_path: str, prompt_id: str, provider="openrouter",
 # retries (e.g. free-tier daily caps): wait, then retry the SAME thread
 RUN_BACKOFFS = (60, 300, 900)
 ABORT_AFTER_CONSECUTIVE = 10
+# carder generation: bump whenever the prompt/schema changes so a re-card
+# regenerates only cards still on an OLDER generation. This makes re-card
+# resumable — a stopped/aborted/rate-limited re-card picks up where it left off
+# instead of redoing the biggest threads from the top every restart. gen 2 = the
+# directives/lessons/gotchas schema.
+CARDER_GEN = 2
 # large free OpenRouter models to round-robin across when one is congested
 # (per-model rate-limits are independent; the daily account cap is shared).
 # Skips tiny models (laguna/xs) — these are 30B+ and the 120B gpt-oss.
@@ -340,8 +346,11 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
              "candidates": 0, "errors": [], "aborted": False}
     conn = fdb.connect(db_path)
     try:
+        # card_gen of the existing card (NULL if uncarded). recard resumes
+        # against this: only cards on an older generation get redone.
         sql = ("SELECT t.prompt_id, t.est_tokens,"
-               " EXISTS(SELECT 1 FROM cards c WHERE c.prompt_id = t.prompt_id)"
+               " (SELECT c.card_gen FROM cards c WHERE c.prompt_id ="
+               " t.prompt_id)"
                " FROM threads t ")
         args = []
         if project:
@@ -382,8 +391,15 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
             pass
 
     todo = []
-    for prompt_id, est_tokens, has_card in rows:
+    for prompt_id, est_tokens, card_gen in rows:
+        has_card = card_gen is not None
         if has_card and not recard:
+            stats["skipped_existing"] += 1
+            continue
+        # recard is RESUMABLE: skip cards already at the current generation, so
+        # a stop/abort/restart redoes only the cards still on an older gen
+        # (instead of re-processing the biggest threads from the top forever).
+        if has_card and recard and (card_gen or 0) >= CARDER_GEN:
             stats["skipped_existing"] += 1
             continue
         todo.append((prompt_id, est_tokens))

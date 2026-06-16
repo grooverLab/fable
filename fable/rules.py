@@ -139,6 +139,7 @@ def recluster(db_path, min_occ=3, min_sessions=2):
         groups = cluster(items)
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         candidates = 0
+        written = 0
         for (source, canon), g in groups.items():
             occ, nsess, nproj = g["n"], len(g["sessions"]), len(g["projects"])
             is_cand = occ >= min_occ and nsess >= min_sessions
@@ -172,6 +173,9 @@ def recluster(db_path, min_occ=3, min_sessions=2):
                     (canon, display, source, scope, project,
                      "candidate" if is_cand else "subthreshold",
                      occ, nsess, nproj, evidence, g["first"], g["last"], now))
+            written += 1
+            if written % 50 == 0:
+                conn.commit()      # release the write lock every ~50 clusters
         conn.commit()
         return {"clusters": len(groups), "candidates": candidates,
                 "scanned_cards": scanned}

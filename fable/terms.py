@@ -168,11 +168,17 @@ def index_terms(db_path: str, top_k: int = 12) -> dict:
             for score, ph, tf in scored[:top_k]:
                 rows.append((ph, "concept", pid, tf, score))
 
+        # chunked commits: never hold the single write lock for seconds (that
+        # starved other writers — Rules recluster, the live carder — into
+        # 'database is locked'). Each chunk releases the lock in ~ms so
+        # concurrent sessions can interleave.
         conn.execute("DELETE FROM terms")
-        conn.executemany(
-            "INSERT OR REPLACE INTO terms(term, kind, prompt_id, count, score) "
-            "VALUES(?,?,?,?,?)", rows)
         conn.commit()
+        for i in range(0, len(rows), 2000):
+            conn.executemany(
+                "INSERT OR REPLACE INTO terms(term, kind, prompt_id, count, "
+                "score) VALUES(?,?,?,?,?)", rows[i:i + 2000])
+            conn.commit()
         return {"threads": len(per_thread), "terms": len(rows)}
     finally:
         conn.close()
