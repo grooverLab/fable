@@ -366,6 +366,25 @@ TOOLS = [
             "required": ["prompt_id"],
         },
     },
+    {
+        "name": "fable_resume",
+        "description": (
+            "WHERE DID I LEAVE OFF? — call when reopening a project cold, or "
+            "when the user says 'continue' / 'pick up where we left off'. "
+            "Returns the project's last-active time, the most recent threads "
+            "(what you were doing), the last decisions made, unresolved open "
+            "questions, top open tasks, and a suggested next step — one-call "
+            "orientation for resuming. Omit `project` for the most-recently-"
+            "active one."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description":
+                            "project to resume (substring match); omit for "
+                            "most-recently-active"},
+            },
+        },
+    },
 ]
 
 
@@ -666,6 +685,10 @@ def _call_tool(db_path, name, args):
             "status": status, "project": args.get("project"),
             "matched": len(deduped), "offset": offset, "shown": len(tasks),
             "by_project": by_project, "tasks": tasks}, indent=1)
+    if name == "fable_resume":
+        from fable.recall import resume
+        return json.dumps(resume(db_path, project=args.get("project")),
+                          indent=1)
     raise KeyError(f"unknown tool: {name}")
 
 

@@ -584,3 +584,69 @@ def overview(db_path: str, project: Optional[str] = None) -> dict:
             "projects": projects}
     finally:
         conn.close()
+
+
+def _jsonlist(s):
+    try:
+        v = json.loads(s or "[]")
+        return v if isinstance(v, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def resume(db_path: str, project: Optional[str] = None) -> dict:
+    """'Where did I leave off?' — continuity for one project: last-active time,
+    the most recent threads (what you were doing), the last decisions made, any
+    unresolved open questions, and the top open tasks, plus a suggested next
+    step. The cold-start answer every reopened project needs, in one call. With
+    no `project`, resumes the most-recently-active one."""
+    conn = fdb.connect(db_path)
+    try:
+        psql = ("SELECT s.project, MAX(t.last_ts), COUNT(DISTINCT t.prompt_id) "
+                "FROM threads t JOIN sessions s ON s.session_id = t.session_id ")
+        if project:
+            prow = conn.execute(
+                psql + "WHERE LOWER(s.project) LIKE ? GROUP BY s.project "
+                "ORDER BY 2 DESC LIMIT 1",
+                (f"%{project.lower()}%",)).fetchone()
+        else:
+            prow = conn.execute(
+                psql + "GROUP BY s.project ORDER BY 2 DESC LIMIT 1").fetchone()
+        if not prow or not prow[0]:
+            return {"project": project, "found": False,
+                    "note": "no indexed threads for that project"}
+        proj, last_active, nthreads = prow
+        recent, decisions, questions = [], [], []
+        for pid, lts, title, typ, outcome, dec, oq in conn.execute(
+                "SELECT t.prompt_id, t.last_ts, c.title, c.type, c.outcome, "
+                "c.decisions, c.open_questions FROM threads t "
+                "JOIN sessions s ON s.session_id = t.session_id "
+                "LEFT JOIN cards c ON c.prompt_id = t.prompt_id "
+                "WHERE s.project = ? ORDER BY t.last_ts DESC LIMIT 20",
+                (proj,)):
+            if len(recent) < 6:
+                recent.append({"prompt_id": pid, "last_ts": lts,
+                               "title": title, "type": typ,
+                               "outcome": outcome})
+            for d in _jsonlist(dec):
+                if len(decisions) < 5:
+                    decisions.append({"decision": d, "prompt_id": pid,
+                                      "ts": lts})
+            for q in _jsonlist(oq):
+                if len(questions) < 5:
+                    questions.append({"question": q, "prompt_id": pid})
+        from fable import tasktime
+        rows, total, _ = tasktime.open_for_project(db_path, proj, 6)
+        open_tasks = [{"id": r[0], "status": r[1], "subject": r[2],
+                       "priority": r[3], "work_project": r[4]} for r in rows]
+        suggested = (open_tasks[0]["subject"] if open_tasks else
+                     (questions[0]["question"] if questions else
+                      "no open tasks — review recent threads"))
+        fdb.log_op(db_path, "resume", q=proj, hits=nthreads)
+        return {"project": proj, "found": True, "last_active": last_active,
+                "threads": nthreads, "recent_threads": recent,
+                "last_decisions": decisions, "open_questions": questions,
+                "open_tasks": open_tasks, "open_task_total": total,
+                "suggested_next": suggested}
+    finally:
+        conn.close()
