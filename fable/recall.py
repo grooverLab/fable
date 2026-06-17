@@ -528,51 +528,65 @@ def timeline(db_path: str, since: Optional[str] = None,
 
 
 def overview(db_path: str, project: Optional[str] = None) -> dict:
-    """Cold-start corpus map — the 'home screen' an agent reads BEFORE searching,
-    so it knows which project/thread to look in. Per work-project: thread count,
-    open tasks, activity span, top technologies + topics, recent card titles;
-    plus global totals and date span. Pass `project` to scope to one."""
+    """Cold-start corpus map — the 'home screen' an agent reads BEFORE searching.
+    Threads, open tasks, activity span, top technologies + topics and recent
+    titles, ALL grouped by ONE project key per session (its work-project where
+    known, else its cwd-project) so thread counts and task counts reconcile —
+    a project never reads '3000 threads, 0 tasks' because the two were keyed
+    differently. Pass `project` to scope to one."""
+    from collections import Counter, defaultdict
+    from fable import tasktime
+    wp = tasktime.work_projects(db_path)            # {session_id: work-project}
     conn = fdb.connect(db_path)
     try:
-        where, args = "", []
-        if project:
-            where = "WHERE LOWER(s.project) LIKE ?"
-            args = [f"%{project.lower()}%"]
-        rows = conn.execute(
-            f"SELECT COALESCE(s.project,'?') p, COUNT(DISTINCT t.prompt_id), "
-            f"MIN(t.first_ts), MAX(t.last_ts), COALESCE(SUM(t.est_tokens),0) "
-            f"FROM threads t JOIN sessions s ON s.session_id = t.session_id "
-            f"{where} GROUP BY p ORDER BY 2 DESC", args).fetchall()
-        from fable import tasktime
-        open_by: dict = {}
+        cwd_map = dict(conn.execute(
+            "SELECT session_id, project FROM sessions"))
+
+        def proj_of(sid):
+            return wp.get(sid) or cwd_map.get(sid) or "?"
+
+        agg: dict = {}   # project -> {threads, first, last, tokens, recent[]}
+        for sid, fts, lts, tok, title in conn.execute(
+                "SELECT t.session_id, t.first_ts, t.last_ts, "
+                "COALESCE(t.est_tokens,0), c.title FROM threads t "
+                "LEFT JOIN cards c ON c.prompt_id = t.prompt_id "
+                "ORDER BY t.last_ts DESC"):
+            a = agg.setdefault(proj_of(sid), {
+                "threads": 0, "first": None, "last": None,
+                "tokens": 0, "recent": []})
+            a["threads"] += 1
+            a["tokens"] += tok
+            if lts and (a["last"] is None or lts > a["last"]):
+                a["last"] = lts
+            if fts and (a["first"] is None or fts < a["first"]):
+                a["first"] = fts
+            if title and len(a["recent"]) < 5 and title not in a["recent"]:
+                a["recent"].append(title)
+        # open tasks by the SAME key (this is what reconciles with threads)
+        open_by = Counter()
         for tt in tasktime.read(db_path).get("tasks", []):
             if tt.get("drifted") and tt.get("status") in (
                     "pending", "in_progress"):
-                k = tt.get("project") or "?"
-                open_by[k] = open_by.get(k, 0) + 1
-
-        def _top(p, fam, n=5):
-            return [v for (v,) in conn.execute(
-                "SELECT tt.value FROM thread_tags tt JOIN threads th "
-                "ON th.prompt_id = tt.prompt_id JOIN sessions s "
-                "ON s.session_id = th.session_id WHERE s.project = ? "
-                "AND tt.family = ? GROUP BY tt.value "
-                "ORDER BY COUNT(*) DESC LIMIT ?", (p, fam, n))]
-
+                open_by[proj_of(tt.get("session"))] += 1
+        tech = defaultdict(Counter)
+        topics = defaultdict(Counter)
+        for sid, fam, val in conn.execute(
+                "SELECT th.session_id, tg.family, tg.value FROM thread_tags tg "
+                "JOIN threads th ON th.prompt_id = tg.prompt_id "
+                "WHERE tg.family IN ('technology','topic')"):
+            (tech if fam == "technology" else topics)[proj_of(sid)][val] += 1
         projects = []
-        for p, threads, first, last, tok in rows:
-            recent = [r0 for (r0,) in conn.execute(
-                "SELECT c.title FROM cards c JOIN threads th "
-                "ON th.prompt_id = c.prompt_id JOIN sessions s "
-                "ON s.session_id = th.session_id WHERE s.project = ? "
-                "AND c.title IS NOT NULL ORDER BY th.last_ts DESC LIMIT 5",
-                (p,))]
+        for p, a in sorted(agg.items(), key=lambda kv: -kv[1]["threads"]):
+            if project and project.lower() not in p.lower():
+                continue
             projects.append({
-                "name": p, "threads": threads,
+                "name": p, "threads": a["threads"],
                 "open_tasks": open_by.get(p, 0),
-                "first_active": first, "last_active": last, "est_tokens": tok,
-                "top_technologies": _top(p, "technology"),
-                "top_topics": _top(p, "topic"), "recent_titles": recent})
+                "first_active": a["first"], "last_active": a["last"],
+                "est_tokens": a["tokens"],
+                "top_technologies": [v for v, _ in tech[p].most_common(5)],
+                "top_topics": [v for v, _ in topics[p].most_common(5)],
+                "recent_titles": a["recent"]})
         firsts = [p["first_active"] for p in projects if p["first_active"]]
         lasts = [p["last_active"] for p in projects if p["last_active"]]
         return {
@@ -626,8 +640,8 @@ def resume(db_path: str, project: Optional[str] = None) -> dict:
                 (proj,)):
             if len(recent) < 6:
                 recent.append({"prompt_id": pid, "last_ts": lts,
-                               "title": title, "type": typ,
-                               "outcome": outcome})
+                               "title": title or "(latest — not yet carded)",
+                               "type": typ, "outcome": outcome})
             for d in _jsonlist(dec):
                 if len(decisions) < 5:
                     decisions.append({"decision": d, "prompt_id": pid,

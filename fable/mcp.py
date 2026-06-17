@@ -13,6 +13,12 @@ Register in Claude Code:
 import json
 import sys
 
+# Push tools (decisions/failures) surface mined claims unprompted, so they need
+# a STRICTER floor than pull-search: a falsely-surfaced "lesson"/"decision"
+# actively misleads. Empirically, garbage queries top out ~50 while real ones
+# sit at 68-83, so 55 cleanly silences junk.
+_PUSH_FLOOR = 55
+
 TOOLS = [
     {
         "name": "fable_search",
@@ -557,6 +563,8 @@ def _call_tool(db_path, name, args):
                       limit=int(args.get("limit", 40)))
         out = []
         for h in hits:
+            if h.get("low_confidence") or (h.get("score_pct") or 0) < _PUSH_FLOOR:
+                continue                       # quiet on weak/irrelevant queries
             for d in (h.get("decisions") or []):
                 out.append({"decision": d, "prompt_id": h["prompt_id"],
                             "title": h.get("title"), "type": h.get("type"),
@@ -589,6 +597,9 @@ def _call_tool(db_path, name, args):
         out, conn = [], _fdb.connect(db_path)
         try:
             for h in hits:
+                if h.get("low_confidence") or (
+                        h.get("score_pct") or 0) < _PUSH_FLOOR:
+                    continue               # a falsely-surfaced 'lesson' misleads
                 row = conn.execute(
                     "SELECT gotchas, lessons, outcome FROM cards "
                     "WHERE prompt_id = ?", (h["prompt_id"],)).fetchone()
@@ -617,10 +628,17 @@ def _call_tool(db_path, name, args):
         neighbors = similar(db_path, args["prompt_id"],
                             limit=int(args.get("limit", 8)))
         if not neighbors:
-            return json.dumps(
-                {"prompt_id": args["prompt_id"], "neighbors": [],
-                 "note": "no embeddings (run `fable embed`) or this thread "
-                         "isn't embedded"}, indent=1)
+            conn = _fdb.connect(db_path)
+            try:
+                known = conn.execute("SELECT 1 FROM threads WHERE prompt_id = ?",
+                                     (args["prompt_id"],)).fetchone()
+            finally:
+                conn.close()
+            note = ("unknown prompt_id — not a thread in the index" if not known
+                    else "thread not embedded yet (carding/embedding lag) — "
+                         "run `fable embed` and retry")
+            return json.dumps({"prompt_id": args["prompt_id"],
+                               "neighbors": [], "note": note}, indent=1)
         out, conn = [], _fdb.connect(db_path)
         try:
             for pid, cos in neighbors:
