@@ -54,7 +54,10 @@ TOOLS = [
                 "until": {"type": "string", "description":
                           "only threads active on/before this date or ISO "
                           "timestamp; a bare date is inclusive of that day"},
-                "limit": {"type": "integer", "default": 10},
+                "limit": {"type": "integer", "default": 25, "description":
+                          "max results (default 25; raise it freely — there is "
+                          "no hard cap, fetch as many as you need). Current-"
+                          "project threads are ranked first, global below."},
                 "offset": {"type": "integer", "default": 0,
                            "description": "skip first N results (pagination)"},
             },
@@ -107,8 +110,11 @@ TOOLS = [
     {
         "name": "fable_block",
         "description": ("One transcript record by uuid, byte-identical — the "
-                        "exact original bytes. Use to recover a specific tool "
-                        "result or turn that a summary or thread view elided."),
+                        "exact original bytes. WHEN: fable_thread elides a bulky "
+                        "tool_result/turn as '… [truncated — fable block "
+                        "<uuid>]' — pass that uuid here to fetch the full "
+                        "original. It's the tail of the recall drill-down: "
+                        "fable_search → fable_thread → fable_block."),
         "inputSchema": {
             "type": "object",
             "properties": {"uuid": {"type": "string"}},
@@ -224,18 +230,23 @@ TOOLS = [
     {
         "name": "fable_file_diff",
         "description": (
-            "Unified diff between any two reconstructed versions of a file "
-            "(version indices from fable_file_history) — recover exactly what "
-            "changed between two past edits, or between a past version and the "
-            "latest. Pass the file path and the two version indices a and b."),
+            "Unified diff of a file between two reconstructed versions — what "
+            "EXACTLY changed. ALWAYS run this on a file before you edit or reason "
+            "about it: the USER may have changed it since you last saw it (fable "
+            "sweeps those edits in), so never assume a file is as you left it. "
+            "Omit a and b to get the LATEST change in ONE call (most recent edit "
+            "vs the one before); or pass version indices from fable_file_history "
+            "for an older range."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
-                "a": {"type": "integer", "description": "before version index"},
-                "b": {"type": "integer", "description": "after version index"},
+                "a": {"type": "integer", "description":
+                      "before version index (omit → second-latest)"},
+                "b": {"type": "integer", "description":
+                      "after version index (omit → latest)"},
             },
-            "required": ["path", "a", "b"],
+            "required": ["path"],
         },
     },
     {
@@ -394,6 +405,16 @@ TOOLS = [
 ]
 
 
+def _current_project():
+    """The project the MCP server is running in (its cwd basename) — used to
+    rank THIS project's context above global, with no project= filter needed."""
+    try:
+        import os
+        return os.path.basename(os.getcwd()) or None
+    except Exception:
+        return None
+
+
 def _call_tool(db_path, name, args):
     if name == "fable_search":
         from fable.recall import search
@@ -405,8 +426,10 @@ def _call_tool(db_path, name, args):
                       tag=args.get("tag"),
                       sort=args.get("sort", "relevance"),
                       since=args.get("since"), until=args.get("until"),
-                      limit=int(args.get("limit", 10)),
-                      offset=int(args.get("offset", 0)))
+                      limit=int(args.get("limit", 25)),
+                      offset=int(args.get("offset", 0)),
+                      boost_project=(None if args.get("project")
+                                     else _current_project()))
         return json.dumps(hits, indent=1)
     if name == "fable_timeline":
         from fable.recall import timeline
@@ -477,6 +500,11 @@ def _call_tool(db_path, name, args):
         rows = (session_files(db_path, sid) if sid
                 else known_files(db_path, args.get("query", ""),
                                  limit=int(args.get("limit", 40))))
+        proj = _current_project()              # current-project files first
+        if proj and rows and isinstance(rows[0], dict) and "project" in rows[0]:
+            p = proj.lower()
+            rows = sorted(rows, key=lambda r: 0 if p in
+                          (r.get("project") or "").lower() else 1)
         return json.dumps(rows, indent=1)
     if name == "fable_file_history":
         from fable import db as _fdb
@@ -520,9 +548,13 @@ def _call_tool(db_path, name, args):
         from fable.filetime import file_events, reconstruct, file_diff
         versions = reconstruct(file_events(db_path, args["path"]))
         n = len(versions)
-        a, b = int(args["a"]), int(args["b"])
         if not n:
             return f"no reconstructable versions for {args['path']!r}"
+        # default to the LATEST change (most recent edit vs the one before) so
+        # "what changed in this file?" — including the user's own edits — is a
+        # single call, no fable_file_history round-trip needed.
+        b = int(args["b"]) if args.get("b") is not None else n - 1
+        a = int(args["a"]) if args.get("a") is not None else max(0, b - 1)
         if not (0 <= a < n and 0 <= b < n):
             return (f"version out of range for {args['path']!r}: has {n} "
                     f"version(s) (0–{n - 1}), got a={a}, b={b}")
@@ -560,7 +592,9 @@ def _call_tool(db_path, name, args):
         from fable.recall import search
         hits = search(db_path, args["query"], project=args.get("project"),
                       since=args.get("since"), until=args.get("until"),
-                      limit=int(args.get("limit", 40)))
+                      limit=int(args.get("limit", 40)),
+                      boost_project=(None if args.get("project")
+                                     else _current_project()))
         out = []
         for h in hits:
             if h.get("low_confidence") or (h.get("score_pct") or 0) < _PUSH_FLOOR:
@@ -591,7 +625,9 @@ def _call_tool(db_path, name, args):
                 return []
         hits = search(db_path, args["query"], project=args.get("project"),
                       since=args.get("since"), until=args.get("until"),
-                      limit=int(args.get("limit", 40)))
+                      limit=int(args.get("limit", 40)),
+                      boost_project=(None if args.get("project")
+                                     else _current_project()))
         _BAD = ("block", "fail", "couldn't", "could not", "didn't work",
                 "did not work", "abandon", "revert", "broke", "wrong")
         out, conn = [], _fdb.connect(db_path)

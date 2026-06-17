@@ -23,10 +23,13 @@ _VALID = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 # semantic families take ZERO OR MORE (seeded but open-vocabulary)
 CONTROLLED_FAMILIES = ("domain", "activity", "event", "artifact", "outcome",
                        "decision")
-# only these families enforce their enum (unknown values are dropped); every
-# other family lets gpt-oss coin new values, which surface in triage.
-# domain is sacred — it stays the defined set.
-STRICT_FAMILIES = ("domain",)
+# these families snap to their enum: a coined value folds via the synonyms map,
+# or — mapping to nothing — is recorded in tag_proposals for triage (never
+# silently dropped, so the taxonomy keeps evolving). The other controlled
+# families (event, artifact) + all semantic families stay open-vocabulary.
+# These four are domain-agnostic by design (see memory-mcp dimensions.py) so
+# fable works as a general memory layer, not just for software.
+STRICT_FAMILIES = ("domain", "outcome", "activity", "decision")
 SEMANTIC_FAMILIES = ("topic", "technology", "entity", "pattern", "intent",
                      "context")
 ALL_FAMILIES = CONTROLLED_FAMILIES + SEMANTIC_FAMILIES
@@ -37,8 +40,8 @@ _DEFAULT = {
     "controlled": {
         "domain": ["software_engineering", "data_science", "devops",
                    "research", "writing", "analysis", "other"],
-        "activity": ["plan", "implement", "debug", "review", "refactor",
-                     "test", "research", "document", "analyze"],
+        "activity": ["plan", "research", "analyze", "generate", "modify",
+                     "review", "debug", "execute", "compare", "organize"],
         "event": ["decision", "task", "error", "insight", "result"],
         "artifact": ["code", "function", "file", "module", "document",
                      "config", "test", "script"],
@@ -60,6 +63,19 @@ _DEFAULT = {
                     "infrastructure"],
         "entity": [],
     },
+    # generic software→general snaps so the public build (no private taxonomy)
+    # still folds the common specifics onto the abstract activity verbs
+    "synonyms": {
+        "activity": {
+            "implement": "generate", "build": "generate", "create": "generate",
+            "write": "generate", "design": "generate", "develop": "generate",
+            "refactor": "modify", "update": "modify", "edit": "modify",
+            "test": "review", "verify": "review", "validate": "review",
+            "deploy": "execute", "run": "execute", "commit": "execute",
+            "fix": "debug", "investigate": "debug", "troubleshoot": "debug",
+            "decide": "plan", "schedule": "plan",
+        },
+    },
     "blacklist": [],
 }
 
@@ -79,6 +95,7 @@ def load_taxonomy() -> dict:
                 data = json.load(f) or {}
             return {"controlled": dict(data.get("controlled") or {}),
                     "semantic": dict(data.get("semantic") or {}),
+                    "synonyms": dict(data.get("synonyms") or {}),
                     "blacklist": list(data.get("blacklist") or [])}
         except Exception:
             pass  # malformed user file → fall back, never break carding
@@ -111,8 +128,12 @@ def prompt_block() -> str:
              "several domains, activities, decisions, artifacts). Give each "
              "value a confidence 0.0-1.0. Never force a single value."]
     if clines:
-        parts.append("Controlled families — for DOMAIN the value MUST be one "
-                     "from its list below; for the other controlled families "
+        parts.append("Controlled families — for domain, outcome, activity and "
+                     "decision the value MUST be one from its list below "
+                     "(these are abstract on purpose: use the closest general "
+                     "verb, e.g. 'generate' for implement/design/write, "
+                     "'review' for test/verify — the specifics belong in the "
+                     "semantic families). For the other controlled families "
                      "PREFER the listed values but you may coin a new "
                      "snake_case value if none fit (it goes to review):")
         parts.append("\n".join(clines))
@@ -125,17 +146,48 @@ def prompt_block() -> str:
     return "\n".join(parts) + "\n"
 
 
-def validate_tags(raw) -> list:
-    """Normalize the LLM's tags to a deduped list of (family, value).
+_STEM = re.compile(r"(ing|ed|s)$")
 
-    Drops anything invalid: unknown family, bad snake_case, or — for controlled
-    families with a defined enum — a value not in the enum. Never raises.
-    """
+
+def canonicalize(family: str, value: str):
+    """Snap a STRICT-family value onto its enum. Returns:
+      - the canonical enum value (use it),
+      - "" if it's a known misfile to drop (synonyms maps it to "__drop__"),
+      - None if it maps to nothing → caller should PROPOSE it (never lose it).
+    Non-strict / semantic families pass through unchanged (open vocabulary)."""
+    if family not in STRICT_FAMILIES:
+        return value
     tax = load_taxonomy()
-    ctrl = tax.get("controlled") or {}
-    bl = {tuple(x) for x in (tax.get("blacklist") or [])}
+    enum = set((tax.get("controlled") or {}).get(family) or [])
+    syn = (tax.get("synonyms") or {}).get(family) or {}
+    if value in enum:
+        return value
+    if value in syn:
+        m = syn[value]
+        return "" if m == "__drop__" else m
+    stem = _STEM.sub("", value)
+    if stem != value:
+        if stem in enum:
+            return stem
+        if stem in syn:
+            m = syn[stem]
+            return "" if m == "__drop__" else m
+    return None
+
+
+def validate_tags(raw):
+    """Normalize the LLM's tags. Returns (tags, proposals):
+      tags      = deduped [(family, value, confidence)]; STRICT controlled
+                  families are snapped to their enum (synonyms fold variants).
+      proposals = [(family, value)] the model coined for a STRICT family that
+                  maps to nothing — held for triage, never silently dropped.
+    Never raises.
+    """
+    bl = {tuple(x) for x in (load_taxonomy().get("blacklist") or [])}
     out: list = []
+    proposals: list = []
     seen = set()
+    pseen = set()
     for t in raw or []:
         if not isinstance(t, dict):
             continue
@@ -146,9 +198,15 @@ def validate_tags(raw) -> list:
         if (fam, val) in bl:
             continue
         if fam in STRICT_FAMILIES:
-            allowed = ctrl.get(fam) or []
-            if allowed and val not in allowed:
+            c = canonicalize(fam, val)
+            if c == "":                      # known misfile → drop
                 continue
+            if c is None:                    # unknown → propose, don't tag
+                if (fam, val) not in pseen:
+                    pseen.add((fam, val))
+                    proposals.append((fam, val))
+                continue
+            val = c
         try:
             conf = max(0.0, min(1.0, float(t.get("confidence", 0.7))))
         except (TypeError, ValueError):
@@ -157,7 +215,7 @@ def validate_tags(raw) -> list:
         if key not in seen:
             seen.add(key)
             out.append((fam, val, round(conf, 3)))
-    return out
+    return out, proposals
 
 
 def _read_raw() -> dict:
@@ -182,14 +240,55 @@ def _save(data: dict) -> None:
 
 
 def promote(family: str, value: str) -> None:
-    """Add an invented value to the known semantic vocabulary (un-blacklist it)."""
+    """Add an invented value to the known vocabulary (un-blacklist it). A
+    controlled family's value joins that family's ENUM; a semantic family's
+    value joins its seed list."""
     data = _read_raw()
-    lst = data.setdefault("semantic", {}).setdefault(family, [])
+    grp = "controlled" if family in CONTROLLED_FAMILIES else "semantic"
+    lst = data.setdefault(grp, {}).setdefault(family, [])
     if value not in lst:
         lst.append(value)
     data["blacklist"] = [x for x in (data.get("blacklist") or [])
                          if list(x) != [family, value]]
     _save(data)
+
+
+def add_synonym(family: str, value: str, target: str) -> None:
+    """Snap a coined value onto an existing enum value (records value→target in
+    the synonyms map). target='__drop__' marks it a misfile to discard."""
+    data = _read_raw()
+    data.setdefault("synonyms", {}).setdefault(family, {})[value] = target
+    _save(data)
+
+
+def drain_proposal(db_path: str, family: str, value: str,
+                   canonical=None) -> int:
+    """Resolve a triage proposal in the DB (model-free). With `canonical` set
+    (promote → the value itself; snap → the target enum value) its
+    tag_proposals rows are written into thread_tags as `canonical`; with
+    canonical=None (blacklist) they are simply removed. Returns rows moved."""
+    import datetime
+    from fable import db as _fdb
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    conn = _fdb.connect(db_path)
+    try:
+        moved = 0
+        if canonical:
+            for pid, ts in conn.execute(
+                    "SELECT prompt_id, created_at FROM tag_proposals "
+                    "WHERE family=? AND value=?", (family, value)).fetchall():
+                conn.execute(
+                    "INSERT OR REPLACE INTO thread_tags(prompt_id, family,"
+                    " value, score, source, model, created_at)"
+                    " VALUES(?,?,?,1.0,'triage','triage',?)",
+                    (pid, family, canonical, ts or now))
+                moved += 1
+        conn.execute("DELETE FROM tag_proposals WHERE family=? AND value=?",
+                     (family, value))
+        conn.commit()
+        return moved
+    finally:
+        conn.close()
 
 
 def blacklist_value(family: str, value: str) -> None:
@@ -199,3 +298,50 @@ def blacklist_value(family: str, value: str) -> None:
     if [family, value] not in [list(x) for x in bl]:
         bl.append([family, value])
     _save(data)
+
+
+def recanonicalize(db_path: str) -> dict:
+    """One-time fold of existing thread_tags onto the canonical enums. Snapshots
+    the raw tags to thread_tags_raw first (so it stays re-runnable after a vocab
+    change), then for each STRICT-family row: snap → keep; known misfile → drop;
+    unknown → route to tag_proposals. Non-strict families are left untouched."""
+    from fable import db as _fdb
+    fams = STRICT_FAMILIES
+    qs = ",".join("?" * len(fams))
+    conn = _fdb.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS thread_tags_raw "
+                     "AS SELECT * FROM thread_tags WHERE 0")
+        if not conn.execute("SELECT 1 FROM thread_tags_raw LIMIT 1").fetchone():
+            conn.execute("INSERT INTO thread_tags_raw "
+                         "SELECT * FROM thread_tags")
+        rows = conn.execute(
+            "SELECT prompt_id, family, value, score, source, model, created_at"
+            f" FROM thread_tags WHERE family IN ({qs})", fams).fetchall()
+        conn.execute(f"DELETE FROM thread_tags WHERE family IN ({qs})", fams)
+        kept = dropped = proposed = 0
+        seen = set()
+        for pid, fam, val, score, src, model, ts in rows:
+            c = canonicalize(fam, val)
+            if c == "":
+                dropped += 1
+                continue
+            if c is None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO tag_proposals"
+                    "(family, value, prompt_id, created_at, status)"
+                    " VALUES(?,?,?,?,'proposed')", (fam, val, pid, ts))
+                proposed += 1
+                continue
+            if (pid, fam, c) in seen:
+                continue
+            seen.add((pid, fam, c))
+            conn.execute(
+                "INSERT OR REPLACE INTO thread_tags"
+                "(prompt_id, family, value, score, source, model, created_at)"
+                " VALUES(?,?,?,?,?,?,?)", (pid, fam, c, score, src, model, ts))
+            kept += 1
+        conn.commit()
+        return {"kept": kept, "dropped": dropped, "proposed": proposed}
+    finally:
+        conn.close()

@@ -241,6 +241,42 @@ def similar(db_path: str, prompt_id: str, limit: int = 8):
     return _neighbors(rows, selfvecs[0], limit, exclude=prompt_id)
 
 
+def card_vectors(db_path: str, project: str = None):
+    """(prompt_id, vec) for CARD embeddings only, optionally scoped to a
+    project — the scout matches against card vectors, not thread vectors, and
+    scoping keeps the per-turn cosine fast."""
+    conn = fdb.connect(db_path)
+    try:
+        if project:
+            q = ("SELECT e.prompt_id, e.vec, e.dim FROM embeddings e "
+                 "JOIN threads t ON t.prompt_id = e.prompt_id "
+                 "JOIN sessions s ON s.session_id = t.session_id "
+                 "WHERE e.kind='card' AND s.project LIKE ?")
+            args = (f"%{project}%",)
+        else:
+            q = "SELECT prompt_id, vec, dim FROM embeddings WHERE kind='card'"
+            args = ()
+        return [(pid, _unpack(b, d)) for pid, b, d in conn.execute(q, args)]
+    finally:
+        conn.close()
+
+
+def scout_vector_hits(db_path: str, query: str, project: str = None,
+                      limit: int = 8):
+    """Top CARD matches for a prompt by cosine — the scout's semantic matcher.
+    Returns [(prompt_id, cosine)]; [] if no embedding backend. Project-scoped
+    first; meaning-based so an indirect prompt still finds its thread."""
+    be = backend()
+    if not be:
+        return []
+    try:
+        qvec = embed_texts([query], be)[0]
+    except (EmbeddingError, urllib.error.URLError, OSError):
+        return []
+    rows = card_vectors(db_path, project)
+    return _neighbors(rows, qvec, limit)
+
+
 def cmd_embed(args) -> int:
     source = getattr(args, "source", "both") or "both"
     stats = embed(args.db, source=source,

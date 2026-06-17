@@ -232,24 +232,45 @@ def api_tags_proposed(db_path, params):
             "SELECT family, value, COUNT(DISTINCT prompt_id) n FROM thread_tags"
             " WHERE family != 'domain' GROUP BY family, value ORDER BY n DESC"
         ).fetchall()
+        # controlled-family coined values held in the triage sink (these are
+        # the post-recanonicalize proposals; thread_tags itself is now clean)
+        sink = conn.execute(
+            "SELECT family, value, COUNT(DISTINCT prompt_id) n FROM tag_proposals"
+            " WHERE status='proposed' GROUP BY family, value ORDER BY n DESC"
+        ).fetchall()
     finally:
         conn.close()
-    out = [{"family": f, "value": v, "threads": n} for f, v, n in rows
-           if v not in known.get(f, set()) and (f, v) not in bl]
+    out = [{"family": f, "value": v, "threads": n, "sink": True}
+           for f, v, n in sink if (f, v) not in bl]
+    out += [{"family": f, "value": v, "threads": n} for f, v, n in rows
+            if v not in known.get(f, set()) and (f, v) not in bl]
     return {"proposed": out[:300], "total": len(out)}
 
 
 def post_tags_promote(db_path, body):
     from fable import taxonomy as tax
     fam, val = body["family"], body["value"]
-    tax.promote(fam, val)
-    return {"ok": True, "promoted": f"{fam}:{val}"}
+    tax.promote(fam, val)                     # joins the enum / seed list
+    moved = tax.drain_proposal(db_path, fam, val, canonical=val)  # sink → tags
+    return {"ok": True, "promoted": f"{fam}:{val}", "applied": moved}
+
+
+def post_tags_snap(db_path, body):
+    """Snap a proposal onto an existing enum value (target), or drop it
+    (target='__drop__'): records the synonym and applies it to the data."""
+    from fable import taxonomy as tax
+    fam, val, target = body["family"], body["value"], body["target"]
+    tax.add_synonym(fam, val, target)
+    canon = None if target == "__drop__" else target
+    moved = tax.drain_proposal(db_path, fam, val, canonical=canon)
+    return {"ok": True, "snapped": f"{fam}:{val}→{target}", "applied": moved}
 
 
 def post_tags_blacklist(db_path, body):
     from fable import taxonomy as tax
     fam, val = body["family"], body["value"]
     tax.blacklist_value(fam, val)
+    tax.drain_proposal(db_path, fam, val, canonical=None)  # clear the sink
     conn = fdb.connect(db_path)               # drop existing rows immediately
     try:
         conn.execute("DELETE FROM thread_tags WHERE family=? AND value=?",
@@ -935,21 +956,28 @@ def post_tasks_meta(db_path, body):
     conn = fdb.connect(db_path)
     try:
         conn.execute(tasktime._OVERLAY_DDL)
-        cur = conn.execute("SELECT removed,priority,note FROM task_meta "
-                           "WHERE session=? AND task_id=?",
+        try:
+            conn.execute("ALTER TABLE task_meta ADD COLUMN done INTEGER "
+                         "DEFAULT 0")
+        except Exception:
+            pass
+        cur = conn.execute("SELECT removed,priority,note,COALESCE(done,0) "
+                           "FROM task_meta WHERE session=? AND task_id=?",
                            (sess, tid)).fetchone()
         removed = body.get("removed", cur[0] if cur else 0)
         priority = body.get("priority", cur[1] if cur else None)
         note = body.get("note", cur[2] if cur else None)
+        done = body.get("done", cur[3] if cur else 0)
         conn.execute(
             "INSERT OR REPLACE INTO task_meta(session,task_id,removed,priority,"
-            "note,updated_ts) VALUES(?,?,?,?,?,?)",
-            (sess, tid, int(removed or 0), priority, note,
+            "note,done,updated_ts) VALUES(?,?,?,?,?,?,?)",
+            (sess, tid, int(removed or 0), priority, note, int(done or 0),
              _t.strftime("%Y-%m-%dT%H:%M:%S")))
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True, "removed": int(removed or 0), "priority": priority}
+    return {"ok": True, "removed": int(removed or 0), "priority": priority,
+            "done": int(done or 0)}
 
 
 def api_rules(db_path, params):
@@ -1373,6 +1401,16 @@ def api_logs(db_path, params):
             "backfill": api_backfill_progress(db_path, {})}
 
 
+def api_executive(db_path, params):
+    """High-level, narratable briefing of the WHOLE archive — for the voice/
+    assistant layer (V.A.U.L.T./Cookie) to speak the state of every project.
+    Deliberately a SERVE endpoint, not an MCP tool (it's for relaying, not
+    routing). GET /api/executive."""
+    from fable.recall import executive
+    return executive(db_path)
+
+
+ROUTES["/api/executive"] = api_executive
 ROUTES["/api/logs"] = api_logs
 ROUTES["/api/cards/health"] = api_cards_health
 ROUTES["/api/backfill"] = api_backfill_progress
@@ -1862,6 +1900,7 @@ POST_ROUTES["/api/cards/resume"] = post_cards_resume
 POST_ROUTES["/api/cards/dequeue"] = post_cards_dequeue
 POST_ROUTES["/api/cards/job"] = post_cards_job
 POST_ROUTES["/api/tags/promote"] = post_tags_promote
+POST_ROUTES["/api/tags/snap"] = post_tags_snap
 POST_ROUTES["/api/tags/blacklist"] = post_tags_blacklist
 POST_ROUTES["/api/tags/autopromote"] = post_tags_autopromote
 POST_ROUTES["/api/tasks/rebuild"] = post_tasks_rebuild

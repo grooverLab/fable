@@ -25,6 +25,7 @@ BUDGET_SLACK = 1.5  # hard output cap = budget chars * slack
 # (FTS5 always returns *something*, so a consumer needs a "this is noise" signal).
 _SCORE_HALF = 150.0
 _LOW_CONF_PCT = 40
+_PROJECT_BOOST = 15   # soft current-project bonus (score_pct points) for ranking
 
 
 class StaleIndexError(RuntimeError):
@@ -261,6 +262,100 @@ def _time_bounds(since: Optional[str], until: Optional[str]):
     return since, until
 
 
+def scout_search(db_path: str, query: str, limit: int = 8) -> List[dict]:
+    """The scout's lean hot path: FTS-bm25 over CARD rows only, top-`limit`,
+    carrying just the fields the teaser needs. No semantic merge and NO
+    200-candidate metadata loop (that loop is what made search() ~1.7s) — so
+    this runs in tens of ms. Card hits keep the same 25x weight search() gives
+    them, so score_pct and the scout floor stay calibrated."""
+    fts_query = _fts_query(query)
+    if not fts_query:
+        return []
+    conn = fdb.connect(db_path)
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT prompt_id, -rank AS r, "
+                "snippet(fts, 0, '«', '»', '…', 16) AS snip "
+                "FROM fts WHERE fts MATCH ? AND kind='card' "
+                "ORDER BY rank LIMIT ?", (fts_query, limit)).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        out = []
+        for pid, r, snip in rows:
+            score = (r or 0) * 25
+            card = conn.execute(
+                "SELECT title, type, outcome, decisions FROM cards "
+                "WHERE prompt_id=?", (pid,)).fetchone() or (None, None,
+                                                            None, None)
+            meta = conn.execute(
+                "SELECT t.last_ts, s.project FROM threads t LEFT JOIN sessions s"
+                " ON s.session_id=t.session_id WHERE t.prompt_id=?",
+                (pid,)).fetchone() or (None, None)
+            try:
+                decisions = json.loads(card[3]) if card[3] else []
+            except Exception:
+                decisions = []
+            pct = round(100 * score / (score + _SCORE_HALF)) if score else 0
+            out.append({
+                "prompt_id": pid, "score": round(score, 3), "score_pct": pct,
+                "low_confidence": pct < _LOW_CONF_PCT,
+                "snippet": " ".join((snip or "").split())[:240],
+                "title": card[0], "type": card[1], "outcome": card[2],
+                "decisions": decisions, "last_ts": meta[0], "project": meta[1],
+            })
+        return out
+    finally:
+        conn.close()
+
+
+# cosine→confidence calibration for the scout. nomic 'same-topic' cosine tops
+# ~0.78, so map [_COS_FLOOR, _COS_CEIL] -> [0,100]. PROVISIONAL — Phase 3
+# (fire/conversion log) replaces these with values learned from real usage.
+_COS_FLOOR = 0.50
+_COS_CEIL = 0.66
+
+
+def scout_vector_search(db_path: str, query: str, project: str = None,
+                        limit: int = 8) -> List[dict]:
+    """Semantic scout matcher — cosine over CARD vectors. Finds the right thread
+    even when the prompt's wording differs (an indirect prompt still matches).
+    Confidence = rescaled cosine: bounded and NOT gamed by query length, unlike
+    bm25. Empty if no embedding backend (caller falls back to scout_search)."""
+    from fable import embeddings as emb
+    hits = emb.scout_vector_hits(db_path, query, project=project, limit=limit)
+    if not hits:
+        return []
+    conn = fdb.connect(db_path)
+    try:
+        out = []
+        for pid, cos in hits:
+            pct = round(100 * max(0.0, min(
+                1.0, (cos - _COS_FLOOR) / (_COS_CEIL - _COS_FLOOR))))
+            card = conn.execute(
+                "SELECT title, type, outcome, decisions FROM cards "
+                "WHERE prompt_id=?", (pid,)).fetchone() or (None, None,
+                                                            None, None)
+            meta = conn.execute(
+                "SELECT t.last_ts, s.project FROM threads t LEFT JOIN sessions s"
+                " ON s.session_id=t.session_id WHERE t.prompt_id=?",
+                (pid,)).fetchone() or (None, None)
+            try:
+                decisions = json.loads(card[3]) if card[3] else []
+            except Exception:
+                decisions = []
+            out.append({
+                "prompt_id": pid, "score": round(cos, 4), "score_pct": pct,
+                "low_confidence": pct < _LOW_CONF_PCT, "snippet": None,
+                "title": card[0], "type": card[1], "outcome": card[2],
+                "decisions": decisions, "last_ts": meta[0], "project": meta[1],
+                "cosine": round(cos, 4),
+            })
+        return out
+    finally:
+        conn.close()
+
+
 def search(db_path: str, query: str, operative: Optional[str] = None,
            target: Optional[str] = None, limit: int = 10,
            sort: str = "relevance", kind: Optional[str] = None,
@@ -270,7 +365,8 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
            tag: Optional[str] = None,
            since: Optional[str] = None,
            until: Optional[str] = None,
-           offset: int = 0) -> List[dict]:
+           offset: int = 0, semantic: bool = True,
+           boost_project: str = None) -> List[dict]:
     """kind: 'main' | 'subagent' (majority-sidechain threads);
     model/project: substring match; session: exact session scope;
     since/until: ISO date or timestamp window on the thread's activity;
@@ -338,7 +434,7 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
         # score ceiling so they can actually compete (graceful off). NOT when a
         # prompt-level SQL filter (tag/operative/target) is active — the booster
         # runs after that SQL, so it would leak unfiltered prompts past the facet.
-        if fts_query is not None and not (tag or operative or target):
+        if semantic and fts_query is not None and not (tag or operative or target):
             try:
                 from fable.embeddings import semantic_hits
                 have = {h[0] for h in hits}
@@ -437,6 +533,15 @@ def search(db_path: str, query: str, operative: Optional[str] = None,
                 h["low_confidence"] = h["score_pct"] < _LOW_CONF_PCT
         results.sort(key=SORT_KEYS.get(sort, SORT_KEYS["relevance"]),
                      reverse=(sort == "recent"))
+        if boost_project and fts_query is not None:
+            # SOFT boost — current-project gets a fixed bonus so it outranks a
+            # COMPARABLE global hit, but a much stronger global match can still
+            # surface (a hard partition buried strong cross-project answers under
+            # weak local ones).
+            bp = boost_project.lower()
+            results.sort(key=lambda h: -((h.get("score_pct") or 0)
+                         + (_PROJECT_BOOST if bp in (h.get("project") or "").lower()
+                            else 0)))
         page = results[offset:offset + limit]
         fdb.log_op(db_path, "search", q=query or "", hits=len(page))
         return page
@@ -606,6 +711,72 @@ def _jsonlist(s):
         return v if isinstance(v, list) else []
     except (ValueError, TypeError):
         return []
+
+
+def executive(db_path: str, top: int = 10) -> dict:
+    """High-level, NARRATABLE briefing of the WHOLE archive — the 'state of every
+    project' for a voice/assistant layer to speak. Reuses overview() and enriches
+    each project with its most recent decisions + an activity status, plus a
+    ready-to-speak `narration`. NOT a per-query recall tool: the bird's-eye
+    'what's going on across everything', for relaying — not for routing."""
+    import datetime
+    from collections import defaultdict
+    from fable import tasktime
+    ov = overview(db_path)
+    wp = tasktime.work_projects(db_path)
+    conn = fdb.connect(db_path)
+    try:
+        cwd_map = dict(conn.execute("SELECT session_id, project FROM sessions"))
+
+        def proj_of(sid):
+            return wp.get(sid) or cwd_map.get(sid) or "?"
+
+        dec_by = defaultdict(list)
+        for sid, dec in conn.execute(
+                "SELECT t.session_id, c.decisions FROM cards c "
+                "JOIN threads t ON t.prompt_id = c.prompt_id "
+                "WHERE c.decisions IS NOT NULL AND c.decisions != '[]' "
+                "ORDER BY t.last_ts DESC"):
+            p = proj_of(sid)
+            if len(dec_by[p]) < 3:
+                for d in _jsonlist(dec)[:1]:
+                    dec_by[p].append(d)
+    finally:
+        conn.close()
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    def status(last):
+        if not last:
+            return "dormant"
+        try:
+            d = (now - datetime.datetime.fromisoformat(
+                last.replace("Z", "+00:00"))).days
+        except Exception:
+            return "unknown"
+        return ("active" if d <= 2 else "recent" if d <= 14
+                else "idle" if d <= 60 else "dormant")
+
+    projs = []
+    for p in ov["projects"][:top]:
+        projs.append({
+            "name": p["name"], "status": status(p["last_active"]),
+            "last_active": p["last_active"], "threads": p["threads"],
+            "open_tasks": p["open_tasks"], "about": p["top_topics"][:4],
+            "tech": p["top_technologies"][:3], "recent": p["recent_titles"][:3],
+            "decisions": dec_by.get(p["name"], [])[:2]})
+    t = ov["totals"]
+    parts = [f"{t['projects']} projects, {t['threads']} threads, "
+             f"{t['open_tasks']} open tasks across the archive."]
+    for p in projs[:5]:
+        s = (f"{p['name']}: {p['status']}, {p['threads']} threads, "
+             f"{p['open_tasks']} open")
+        if p["about"]:
+            s += f", on {', '.join(p['about'][:2])}"
+        if p["decisions"]:
+            s += f"; last decided — {p['decisions'][0][:90]}"
+        parts.append(s + ".")
+    return {"totals": t, "span": ov["span"], "projects": projs,
+            "narration": " ".join(parts)}
 
 
 def resume(db_path: str, project: Optional[str] = None) -> dict:

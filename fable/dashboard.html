@@ -2101,7 +2101,8 @@ function renderRules(){
 }
 
 /* ── Tasks tab: the durable backlog (tasktime) ── */
-let TASKS_DATA=null, TASKS_F={status:"all",q:"",proj:null}, TASKS_OPEN={};
+let TASKS_DATA=null, TASKS_F={status:"all",q:"",proj:null,bucket:"tasks"}, TASKS_OPEN={};
+const TASK_BUCKETS={tasks:['task','inline'],features:['feature'],ideas:['idea']};
 const TSTAT={completed:["✓","var(--green)"],in_progress:["◐","var(--cyan)"],
   pending:["○","var(--dim)"],deleted:["✗","var(--faint)"],unknown:["·","var(--faint)"]};
 async function loadTasks(force){
@@ -2116,6 +2117,7 @@ function taskFilter(k,v){TASKS_F[k]=v;renderTasks();}
 function taskProj(p){TASKS_F.sess=null;TASKS_F.proj=TASKS_F.proj===p?null:p;renderTasks();}
 function taskClearSess(){TASKS_F.sess=null;renderTasks();}
 function taskType(s){TASKS_F.src=TASKS_F.src===s?null:s;renderTasks();}
+function taskBucket(b){TASKS_F.bucket=b;TASKS_F.src=null;TASKS_OPEN={};renderTasks();}
 function taskToggle(p){TASKS_OPEN[p]=!TASKS_OPEN[p];renderTasks();}
 async function taskMetaPost(sess,id,fields){
   await fetch("/api/tasks/meta",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -2123,9 +2125,10 @@ async function taskMetaPost(sess,id,fields){
   TASKS_DATA=await api("/api/tasks").catch(()=>TASKS_DATA);
   renderTasks();
 }
-function taskCyclePrio(ev,sess,id,cur){ev.stopPropagation();
-  const di=cur==null?0:cur+1, ndi=(di+1)%5;            // ·, P0, P1, P2, P3
-  taskMetaPost(sess,id,{priority:ndi===0?null:ndi-1});}
+function taskSetPrio(ev,sess,id,v){ev.stopPropagation();
+  taskMetaPost(sess,id,{priority:(v===''||v==null)?null:+v});}
+function taskSetDone(ev,sess,id,v){ev.stopPropagation();
+  taskMetaPost(sess,id,{done:v});}
 function taskRemove(ev,sess,id){ev.stopPropagation();
   taskMetaPost(sess,id,{removed:1});}
 function taskModal(sess,id){
@@ -2145,7 +2148,8 @@ function taskModal(sess,id){
     ${row("task id",`#${esc(String(t.id!=null?t.id:"?"))}${t.interp?' <span style="color:var(--faint)">(interpolated — no recovered result)</span>':""}`)}
     ${row("session",esc(String(t.session||"").slice(0,8)))}
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:18px">
-      ${t.id!=null?`<button class="ghost" onclick="taskRemove(event,'${esc(t.session)}',${t.id});closeModal()">remove</button>`:""}
+      ${t.id!=null?`<button class="ghost" onclick="taskSetDone(event,'${esc(t.session)}',${t.id},${t.done?0:1});closeModal()" title="${t.done?'mark not done':'mark done — crosses it off the list (source transcript untouched)'}">${t.done?'↺ undo done':'✓ mark done'}</button>`:""}
+      ${t.id!=null?`<button class="ghost" onclick="taskRemove(event,'${esc(t.session)}',${t.id});closeModal()" title="hide from the backlog view — does NOT delete the source transcript">remove</button>`:""}
       ${t.prompt_id?`<button onclick="taskThread('${esc(t.prompt_id)}','${esc(t.session)}',${t.id==null?'null':t.id})">open source thread ↗</button>`:""}
     </div></div>`;
   openModal("Task","#"+(t.id!=null?t.id:"?")+(t.project?" · "+t.project:""),body);
@@ -2179,7 +2183,7 @@ function renderTasks(){
   const f=TASKS_F, pct=d.created?Math.round(100*d.recovered/d.created):0;
   const ts=d.tasks.filter(t=>{
     if(f.sess&&t.session!==f.sess)return false;
-    if(f.src&&(t.source||"task")!==f.src)return false;
+    if(!(TASK_BUCKETS[f.bucket]||TASK_BUCKETS.tasks).includes(t.source||"task"))return false;
     if(f.status==="open"&&!t.drifted)return false;
     if(f.status==="completed"&&t.status!=="completed")return false;
     if(f.status==="in_progress"&&t.status!=="in_progress")return false;
@@ -2191,8 +2195,9 @@ function renderTasks(){
   const order=Object.keys(groups).sort((a,b)=>groups[b].length-groups[a].length);
   if(!Object.keys(TASKS_OPEN).length)order.forEach(p=>TASKS_OPEN[p]=true);
   const pill=(k,lbl)=>`<span class="bf-btn" style="${f.status===k?'background:var(--phos);color:#04130c;border-color:var(--phos)':''}" onclick="taskFilter('status','${k}')">${lbl}</span>`;
-  const srcCount={}; d.tasks.forEach(t=>{const s=t.source||'task';srcCount[s]=(srcCount[s]||0)+1;});
-  const typePill=(s,lbl)=>`<span class="bf-btn" style="${(f.src||null)===s?'background:var(--cyan);color:#04130c;border-color:var(--cyan)':''}" onclick="taskType(${s?`'${s}'`:'null'})">${lbl}${s?' '+(srcCount[s]||0):''}</span>`;
+  const bkCount={tasks:0,features:0,ideas:0};
+  d.tasks.forEach(t=>{const s=t.source||'task'; s==='feature'?bkCount.features++:s==='idea'?bkCount.ideas++:bkCount.tasks++;});
+  const bkTab=(b,lbl)=>`<span class="bf-btn" style="font-size:12.5px;padding:5px 13px;${f.bucket===b?'background:var(--phos);color:#04130c;border-color:var(--phos)':''}" onclick="taskBucket('${b}')">${lbl} <b>${bkCount[b]||0}</b></span>`;
   const chip=p=>{const g=d.by_project[p]||{};return `<span class="badge" style="cursor:pointer;${f.proj===p?'border-color:var(--phos);color:var(--phos)':''}" onclick="taskProj('${esc(p)}')">${esc(p)} <b>${g.total||0}</b>${g.open?` <span style="color:var(--ember)">·${g.open}</span>`:''}</span>`;};
   const body=p=>groups[p].slice().sort((a,b)=>{
       const pa=a.priority==null?9:a.priority, pb=b.priority==null?9:b.priority;
@@ -2201,28 +2206,40 @@ function renderTasks(){
       return (a.id||1e9)-(b.id||1e9);
     }).map(t=>{
     const s=TSTAT[t.status]||TSTAT.unknown;
-    const prov=`onclick="taskModal('${esc(t.session)}',${t.id==null?'null':t.id})" style="cursor:pointer" title="view task details"`;
+    const doneCss=(t.done||t.status==='completed')?'text-decoration:line-through;opacity:.5;':'';
+    const prov=`onclick="taskModal('${esc(t.session)}',${t.id==null?'null':t.id})" style="cursor:pointer;${doneCss}" title="view task details"`;
+    const pOpts=['','0','1','2','3'].map(v=>`<option value="${v}"${String(t.priority==null?'':t.priority)===v?' selected':''}>${v===''?'· none':'P'+v}</option>`).join('');
+    const pSel=`<select onclick="event.stopPropagation()" onchange="taskSetPrio(event,'${t.session}',${t.id},this.value)" title="set priority (P0 = highest), or none" style="background:var(--panel,#0c1410);border:1px solid var(--line,#1d2a22);border-radius:4px;color:${t.priority!=null?'var(--phos)':'var(--faint)'};font-size:10.5px;padding:1px 2px;cursor:pointer">${pOpts}</select>`;
+    const doneBtn=t.done
+      ?`<span onclick="taskSetDone(event,'${t.session}',${t.id},0)" title="undo — mark not done" style="cursor:pointer;color:var(--green);margin-left:7px">↺</span>`
+      :`<span onclick="taskSetDone(event,'${t.session}',${t.id},1)" title="mark done — crosses it off the list (does NOT change the source transcript)" style="cursor:pointer;color:var(--faint);margin-left:7px">✓</span>`;
     const acts=t.id!=null?`<td style="white-space:nowrap;text-align:right;padding:3px 10px 3px 6px">
-        <span onclick="taskCyclePrio(event,'${t.session}',${t.id},${t.priority==null?'null':t.priority})" title="cycle priority (·→P0→P1→P2→P3)" style="cursor:pointer;font-size:10.5px;padding:1px 5px;border:1px solid var(--line,#1d2a22);border-radius:4px;color:${t.priority!=null?'var(--phos)':'var(--faint)'}">${t.priority==null?'·':'P'+t.priority}</span>
-        <span onclick="taskRemove(event,'${t.session}',${t.id})" title="remove this task from the backlog" style="cursor:pointer;color:var(--faint);margin-left:7px">✕</span></td>`:'<td></td>';
+        ${pSel}${doneBtn}
+        <span onclick="taskRemove(event,'${t.session}',${t.id})" title="remove from this backlog view — hides it here; does NOT delete the source transcript" style="cursor:pointer;color:var(--faint);margin-left:7px">✕</span></td>`:'<td></td>';
     return `<tr ${prov} class="trow">
       <td style="color:var(--faint);text-align:right;padding:3px 8px 3px 12px;white-space:nowrap">#${t.id||"?"}${t.interp?'<span style="color:var(--faint)" title="id interpolated (no recovered result)">~</span>':''}</td>
       <td style="white-space:nowrap;padding:3px 10px"><span style="color:${s[1]}">${s[0]} ${esc(t.status)}</span></td>
       <td style="padding:3px 10px">${t.source==='inline'?'<span title="inline checkbox todo (from prose)" style="color:var(--faint);font-size:9px;border:1px solid var(--line,#1d2a22);border-radius:3px;padding:0 4px;margin-right:5px">✎</span>':''}${esc(t.subject)}${t.prompt_id?' <span style="color:var(--cyan);font-size:10px" title="traceable to its card + transcript">↗</span>':''}</td>
       <td style="color:var(--faint);white-space:nowrap;text-align:right;padding:3px 6px 3px 10px">${esc((t.ts||"").slice(0,10))}</td>
       ${acts}</tr>`;}).join("");
-  view.innerHTML=`<div style="margin-bottom:12px"><b style="color:var(--phos);font:600 16px var(--serif)">Backlog</b>
-      <span class="hint"> · every task ever raised — reconstructed from the vault's Task calls; drift = never reached completed</span></div>
+  const BKMETA={tasks:['Tasks','actionable work — Task calls + inline checkboxes'],
+                features:['Features','capabilities flagged to build later (from the carder)'],
+                ideas:['Ideas','possibilities to explore later — a wishlist, not a to-do']};
+  const bm=BKMETA[f.bucket]||BKMETA.tasks;
+  const bk=d.tasks.filter(t=>(TASK_BUCKETS[f.bucket]||TASK_BUCKETS.tasks).includes(t.source||'task'));
+  const bkDone=bk.filter(t=>t.status==='completed'||t.done).length;
+  view.innerHTML=`<div style="margin-bottom:12px"><b style="color:var(--phos);font:600 16px var(--serif)">${bm[0]}</b>
+      <span class="hint"> · ${bm[1]}</span></div>
     <div class="statgrid" style="margin-bottom:12px">
-      <div class="stat"><div class="v">${fmt(d.created)}</div><div class="k">tasks raised</div></div>
-      <div class="stat"><div class="v" style="color:var(--green)">${fmt(d.completed)}</div><div class="k">completed</div></div>
-      <div class="stat"><div class="v" style="color:var(--ember)">${fmt(d.open)}</div><div class="k">open / drifted</div></div>
+      <div class="stat"><div class="v">${fmt(bk.length)}</div><div class="k">${esc(f.bucket)}</div></div>
+      <div class="stat"><div class="v" style="color:var(--green)">${fmt(bkDone)}</div><div class="k">done</div></div>
+      <div class="stat"><div class="v" style="color:var(--ember)">${fmt(bk.length-bkDone)}</div><div class="k">open</div></div>
       <div class="stat"><div class="v">${pct}%</div><div class="k">ids exact</div></div>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
       ${pill("all","all")}${pill("open","open")}${pill("in_progress","in progress")}${pill("completed","done")}
       <span style="color:var(--faint)">·</span>
-      ${typePill(null,"all types")}${typePill("task","tasks")}${typePill("inline","✎ inline")}${srcCount.idea?typePill("idea","ideas"):""}${srcCount.feature?typePill("feature","features"):""}
+      ${bkTab("tasks","☑ Tasks")}${bkTab("features","✦ Features")}${bkTab("ideas","💡 Ideas")}
       ${f.sess?`<span class="badge" style="border-color:var(--cyan);color:var(--cyan);cursor:pointer" onclick="taskClearSess()" title="clear the transcript filter — show all sessions">⟡ session ${esc(f.sess.slice(0,8))} ✕</span>`:""}
       <input id="task-q" placeholder="filter tasks…" value="${esc(f.q)}" oninput="taskFilter('q',this.value)"
         style="margin-left:auto;background:var(--panel,#0c1410);border:1px solid var(--line,#1d2a22);color:var(--text);padding:5px 9px;border-radius:5px;font-size:12px;width:210px"></div>

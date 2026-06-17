@@ -16,6 +16,7 @@ session, so all errors are swallowed into the hook log.
 """
 import json
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -342,6 +343,319 @@ def _capture_task(db_path, payload):
         pass
 
 
+# ── proactive recall scout (UserPromptSubmit) ──────────────────────────────
+# The demand engine: surface relevant memory at the moment of need so an agent
+# that has never used fable still reaches for it. The gate is PROMPT-SIDE
+# (past-work deixis + specific/rare entities) — never the search score, which
+# the evidence showed fires HIGHER on generic questions. Results must then clear
+# an absolute floor AND an entity-presence check before anything is injected:
+# under-push beats over-push (a scout that cries wolf trains banner-blindness).
+_ACK_RE = re.compile(
+    r"^(thanks|thank you|ok|okay|yes|no|cool|great|perfect|nice|done|got it|"
+    r"sure|yep|nope|kk)\b[.! ]*$", re.IGNORECASE)
+_DEIXIS_RE = re.compile(
+    r"\b(we|our|us|earlier|previously|already|last time|"
+    r"where we left off|why did|how did we|continue|resume|pick up|"
+    r"the .{1,40} we (built|made|wrote|chose|decided|did))\b", re.IGNORECASE)
+# identifier/path/hyphenated/backticked/CapWordsMulti — plain-English prompts
+# yield nothing here, which is exactly why "reverse a linked list" stays silent
+_ENTITY_RE = re.compile(
+    r"`([^`\n]{2,60})`"
+    r"|\b([a-z][a-z0-9]*_[a-z0-9_]+)\b"
+    r"|\b([a-z]+[A-Z][A-Za-z0-9]+)\b"
+    r"|\b([\w./-]+\.(?:py|rs|ts|js|tsx|jsx|go|java|rb|sql|md|ya?ml|json|html|"
+    r"css|sh|toml))\b"
+    r"|\b([a-z][a-z0-9]+(?:-[a-z0-9]+)+)\b")
+_GENERIC_ENT = {
+    "python", "rust", "javascript", "typescript", "function", "class",
+    "method", "test", "tests", "fix", "bug", "api", "server", "client",
+    "code", "file", "files", "error", "data", "run", "build", "app", "db",
+    "sql", "json", "yaml", "html", "css", "git", "node", "npm", "docker",
+    "read-only", "up-to-date", "auto-complete", "real-time", "end-to-end"}
+_SCOUT_FLOOR = 70   # hold unless confident; below 70 is not a good-enough sign
+#                     to push. The cosine band (recall._COS_*) is set so genuine
+#                     matches read ~75-100% and noise reads <50%.
+
+
+_STOPWORDS = {
+    "the", "and", "for", "with", "this", "that", "what", "how", "why", "when",
+    "does", "need", "needs", "want", "wants", "let", "lets", "get", "make",
+    "use", "using", "add", "adds", "can", "will", "should", "would", "could",
+    "about", "into", "from", "your", "yours", "their", "them", "they", "have",
+    "has", "had", "was", "were", "been", "are", "is", "be", "do", "did", "done",
+    "now", "then", "here", "there", "some", "any", "all", "more", "most", "new",
+    "old", "next", "last", "first", "current", "issue", "issues", "problem",
+    "thing", "things", "stuff", "part", "way", "ways", "look", "looks", "like",
+    "just", "also", "only", "still", "back", "over", "under", "again", "same"}
+
+
+def _scout_entities(db_path, prompt):
+    """Specific entities from the prompt — the fire signal. Two sources:
+    identifier-shaped tokens (snake_case/path/hyphenated/camelCase/back-ticked —
+    inherently specific), and notable plain words that match fable's KNOWN tag
+    values ("VIX", "auto-rules" — specific because they're from your work). Both
+    are kept only if not ubiquitous (DF below a corpus-share ceiling); the
+    purely-generic (a word in no tag and no identifier) stays silent."""
+    ids, words = set(), set()
+    for m in _ENTITY_RE.finditer(prompt):
+        v = next((g for g in m.groups() if g), "").strip().lower()
+        if 3 <= len(v) <= 60 and v not in _GENERIC_ENT:
+            ids.add(v)
+    for w in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", prompt):  # 3+ chars (orb/vix)
+        wl = w.lower()
+        if wl not in _GENERIC_ENT and wl not in _STOPWORDS:
+            words.add(wl)
+    if not ids and not words:
+        return []
+    try:
+        from fable import db as fdb
+        conn = fdb.connect(db_path)
+    except Exception:
+        return list(ids)[:4]
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] or 1
+        ceil = max(60, n * 4 // 10)
+        # known entities = tag values in the SPECIFIC families only (topic /
+        # technology / entity / pattern). NOT activity/outcome/decision — those
+        # are generic action words ("write", "fix") that would fire on anything.
+        known = {r[0] for r in conn.execute(
+            "SELECT DISTINCT value FROM thread_tags WHERE family IN"
+            " ('topic','technology','entity','pattern')")} if words else set()
+        # augment with the learned NER dictionary — adds file names + the
+        # carder's salient_entities, richer than tag values alone (and it grows
+        # as the dictionary is rebuilt on new cards). Defensive: tags still work
+        # if the dictionary hasn't been built yet.
+        if words:
+            try:
+                from fable import ner as _ner
+                known |= set(_ner.load_dictionary(db_path))
+            except Exception:
+                pass
+        candidates = ids | (words & known)
+        kept = []
+        for v in candidates:
+            try:
+                df = conn.execute(
+                    "SELECT COUNT(DISTINCT prompt_id) FROM terms WHERE term=?",
+                    (v,)).fetchone()[0]
+            except Exception:
+                df = 1
+            # identifiers fire even at df 0 (inherently specific — Stage 3 then
+            # decides if any memory exists); known-tag words need df >= 1
+            if v in ids and df <= ceil:
+                kept.append(v)
+            elif v in known and 1 <= df <= ceil:
+                kept.append(v)
+        # most-specific first (identifiers, then longer) — drives the teaser
+        # head and the search query
+        kept.sort(key=lambda v: (any(c in v for c in "_-./"), len(v)),
+                  reverse=True)
+        return kept[:4]
+    finally:
+        conn.close()
+
+
+def _scout_teaser(entities, hits):
+    head = entities[0] if entities else "this"
+    lines = [f"\U0001f9e0 fable — prior work on «{head}»:"]
+    for h in hits:
+        ts = (h.get("last_ts") or "")[:10]
+        line = f"• {h.get('title') or h.get('prompt_id')}"
+        if ts:
+            line += f" ({ts})"
+        decs = h.get("decisions") or []
+        if decs:
+            line += f"\n  decided: {decs[0][:140]}"
+        lines.append(line)
+    top = hits[0].get("prompt_id")
+    lines.append(f'Recall verbatim: fable_thread("{top}")  ·  '
+                 f'more: fable_search("{head}")')
+    lines.append("Pointer surfaced from memory — verify before relying.")
+    return "<fable-scout>\n" + "\n".join(lines) + "\n</fable-scout>"
+
+
+def _scout_resume_teaser(r):
+    proj = r.get("project") or ""
+    lines = [f"\U0001f9e0 fable — resuming «{proj}» "
+             f"(last active {(r.get('last_active') or '')[:10]}):"]
+    for t in (r.get("recent_threads") or [])[:3]:
+        lines.append(f"• {t.get('title') or t.get('prompt_id')}")
+    decs = r.get("last_decisions") or []
+    if decs:
+        lines.append(f"last decision: {(decs[0].get('decision') or '')[:140]}")
+    sn = r.get("suggested_next")
+    if sn:
+        lines.append(f"suggested next: {sn}")
+    lines.append(f'Full picture: fable_resume("{proj}")')
+    return "<fable-scout>\n" + "\n".join(lines) + "\n</fable-scout>"
+
+
+# ── two-clock design: ALL intelligence is precomputed by the carder (offline);
+# the per-turn path below only matches + does ONE fast bm25 query, so it can
+# never hold the main model. Guardrails: a hard timeout backstop and an
+# activation gate (silent until a project's index is mature — pushing on a thin
+# index breeds banner-blindness; cold-start = silent, which is also correct).
+_SCOUT_TIMEOUT_S = 0.50   # FTS-bm25 over the full corpus is ~180ms here; the
+#                           backstop guards the tail, not the typical path
+_SCOUT_VEC_TIMEOUT_S = 1.5  # embed + cosine is ~0.5s; only the firing path pays
+_SCOUT_MIN_THREADS = 5    # activation gate: carded threads a project needs first
+
+
+def _with_timeout(fn, seconds, default=None):
+    """Run fn() but never let it stall the user's turn — a daemon worker is
+    abandoned if it overruns (the hook runs synchronously before the turn)."""
+    import threading
+    box = {"v": default}
+
+    def run():
+        try:
+            box["v"] = fn()
+        except Exception:
+            box["v"] = default
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(seconds)
+    return box["v"]
+
+
+def _scout_project(payload):
+    """The current context's project = the cwd basename, which matches the
+    cwd-derived `sessions.project` the threads are stored under. Same-context
+    memory ranks above cross-project."""
+    cwd = payload.get("cwd") or ""
+    return os.path.basename(cwd) if cwd else None
+
+
+def _project_mature(db_path, project):
+    """Activation gate — a project must have accumulated enough carded threads
+    before the scout pushes. Unknown cwd → don't block (the global corpus is
+    mature). A brand-new project stays silent until it grows."""
+    if not project:
+        return True
+    try:
+        from fable import db as fdb
+        conn = fdb.connect(db_path)
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM cards c JOIN threads t"
+                " ON t.prompt_id = c.prompt_id JOIN sessions s"
+                " ON s.session_id = t.session_id WHERE s.project LIKE ?",
+                (f"%{project}%",)).fetchone()[0]
+        finally:
+            conn.close()
+        return n >= _SCOUT_MIN_THREADS
+    except Exception:
+        return True
+
+
+def _log_scout_fire(db_path, session_id, hits, query):
+    """Record what the scout surfaced, so we can measure whether it got used
+    (precision = used/fires → calibrates the floor). Never raises."""
+    try:
+        import datetime
+        from fable import db as fdb
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn = fdb.connect(db_path)
+        try:
+            for h in hits:
+                conn.execute(
+                    "INSERT INTO scout_fires(session_id, prompt_id, score_pct,"
+                    " query, created_at) VALUES(?,?,?,?,?)",
+                    (session_id, h.get("prompt_id"), h.get("score_pct"),
+                     (query or "")[:200], now))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _mark_scout_conversion(db_path, payload):
+    """When the agent opens a thread the scout surfaced (fable_thread/block/
+    recall on that prompt_id), mark the fire `used` — that's a conversion."""
+    try:
+        tool = payload.get("tool_name") or ""
+        if not any(k in tool for k in ("fable_thread", "fable_block",
+                                       "fable_recall")):
+            return
+        ti = payload.get("tool_input") or {}
+        pid = ti.get("prompt_id") or ti.get("uuid") or ti.get("block_id") or ""
+        if not pid:
+            return
+        from fable import db as fdb
+        conn = fdb.connect(db_path)
+        try:
+            conn.execute("UPDATE scout_fires SET used=1 WHERE prompt_id=?"
+                         " AND used=0", (pid,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def _scout(db_path, payload):
+    """Staged proactive-recall gate. Returns a <fable-scout> teaser or ''."""
+    prompt = (payload.get("prompt") or "").strip()
+    if len(prompt) < 12 or _ACK_RE.match(prompt):              # Stage 0
+        return ""
+    deixis = bool(_DEIXIS_RE.search(prompt))
+    entities = _scout_entities(db_path, prompt)                # Stage 1
+    if not deixis and not entities:
+        return ""
+    project = _scout_project(payload)
+    if not _project_mature(db_path, project):                  # activation gate
+        return ""
+    try:
+        from fable.recall import scout_search, scout_vector_search, resume
+        if entities:                                           # Stage 2 retrieve
+            # HYBRID — run BOTH and fire on the best of either. Vectors find the
+            # thread even when wording differs; bm25 catches exact identifiers the
+            # embedding misses. Each wins for different prompts, so neither is
+            # gated behind the other (the old "fall back only if vectors empty"
+            # was unreachable: a junk-but-non-empty vector list blocked bm25).
+            vec = _with_timeout(   # GLOBAL — not project-scoped, so cross-project
+                lambda: scout_vector_search(db_path, prompt, limit=12),
+                _SCOUT_VEC_TIMEOUT_S, default=[]) or []  # recall works too
+            lex = _with_timeout(
+                lambda: scout_search(db_path, " ".join(entities), limit=8),
+                _SCOUT_TIMEOUT_S, default=[]) or []
+            best = {}                                          # prompt_id -> hit
+            for h in vec:                       # vectors: cosine IS the confidence
+                if not h.get("low_confidence") and \
+                        (h.get("score_pct") or 0) >= _SCOUT_FLOOR:
+                    best[h["prompt_id"]] = h
+            for h in lex:                       # bm25: require entity-presence
+                if h.get("low_confidence") or \
+                        (h.get("score_pct") or 0) < _SCOUT_FLOOR:
+                    continue
+                blob = " ".join([h.get("title") or "", h.get("snippet") or "",
+                                 " ".join(h.get("decisions") or [])]).lower()
+                if not any(e in blob for e in entities):
+                    continue
+                cur = best.get(h["prompt_id"])
+                if not cur or (h.get("score_pct") or 0) > (cur.get("score_pct") or 0):
+                    best[h["prompt_id"]] = h
+            if not best:
+                return ""
+            keep = sorted(best.values(), key=lambda h: -(  # soft project boost:
+                (h.get("score_pct") or 0)                  # local outranks a
+                + (15 if project and project.lower() in     # comparable global,
+                   (h.get("project") or "").lower() else 0)))  # not a hard wall
+            _log_scout_fire(db_path, payload.get("session_id"), keep[:3], prompt)
+            return _scout_teaser(entities, keep[:3])
+        cwd = payload.get("cwd") or ""                         # deixis → resume
+        r = _with_timeout(
+            lambda: resume(db_path,
+                           project=os.path.basename(cwd) if cwd else None),
+            _SCOUT_TIMEOUT_S)
+        if not r or not r.get("found") or not r.get("recent_threads"):
+            return ""
+        return _scout_resume_teaser(r)
+    except Exception:
+        return ""
+
+
 def run_hook(db_path: str, payload: dict) -> dict:
     transcript = payload.get("transcript_path")
     event = payload.get("hook_event_name", "?")
@@ -350,6 +664,7 @@ def run_hook(db_path: str, payload: dict) -> dict:
     if event == "PostToolUse":
         result = _post_tool(payload)
         _capture_task(db_path, payload)        # M2: live task ledger
+        _mark_scout_conversion(db_path, payload)  # scout precision loop
         msg = _auto_prune(db_path, payload)
         if msg:
             result["system_message"] = msg
@@ -366,9 +681,18 @@ def run_hook(db_path: str, payload: dict) -> dict:
         payload = dict(payload, tool_name="Bash")
         result = _post_tool(payload)
         _tail_index(db_path, transcript)
+        parts = []
         note = _externalize_note(db_path)
         if note:
-            result["inject"] = note
+            parts.append(note)
+        try:                                    # the proactive recall scout
+            teaser = _scout(db_path, payload)
+            if teaser:
+                parts.append(teaser)
+        except Exception:
+            pass
+        if parts:
+            result["inject"] = "\n\n".join(parts)
             result["event"] = "UserPromptSubmit"
         return result
 
@@ -384,6 +708,13 @@ def run_hook(db_path: str, payload: dict) -> dict:
             if block:
                 parts.append(block)
         except FileNotFoundError:
+            pass
+        try:    # Phase 2 enforcement — inject the user's APPROVED standing rules
+            from fable.rules import render_rules
+            rblock = render_rules(db_path, project=project)
+            if rblock:
+                parts.append(rblock)
+        except Exception:
             pass
         if payload.get("source") == "compact" and session != "?":
             # a tool description is passive; THIS fires the instruction at the
@@ -404,20 +735,30 @@ def run_hook(db_path: str, payload: dict) -> dict:
                 "conversation, a past decision, or a prior code discussion "
                 "that isn't in your context, call fable_search instead of "
                 "guessing — it indexes this and every past session, verbatim.")
-        # M7: resurface this project's open/drifted tasks so they don't get lost
+        # M7: resurface open/drifted tasks so they don't get lost. The reminder
+        # fires for the cwd dir, but the tasks usually belong to the
+        # work-project(s) you build FROM that dir — label by work-project so
+        # e.g. 61 fable + 42 qt tasks aren't mis-bannered as the cwd's name.
         try:
             from fable import tasktime
-            rows, total = tasktime.open_for_project(db_path, project, 8)
+            rows, total, by_project = tasktime.open_for_project(
+                db_path, project, 8)
             if rows:
+                breakdown = " · ".join(
+                    f"{p} {n}" for p, n in sorted(
+                        by_project.items(), key=lambda kv: -kv[1]))
                 lines = [
-                    f"  #{r[0]} [{r[1]}] {(r[2] or '')[:78]}"
-                    + (f"  ·P{r[3]}" if r[3] is not None else "") for r in rows]
+                    f"  #{r[0]} [{r[1]}] {(r[2] or '')[:72]}"
+                    + (f"  ·P{r[3]}" if r[3] is not None else "")
+                    + (f"  ({r[4]})" if r[4] and r[4] != project else "")
+                    for r in rows]
                 more = (f"\n  …and {total - len(rows)} more — open the Tasks tab"
                         if total > len(rows) else "")
                 parts.append(
-                    f"<fable-open-tasks project=\"{project}\" count=\"{total}\">\n"
-                    f"{total} open task(s) in this project, resurfaced so they "
-                    f"don't drift — pick one up, or mark done / remove if stale:\n"
+                    f"<fable-open-tasks cwd=\"{project}\" count=\"{total}\">\n"
+                    f"{total} open task(s) surfaced from this directory, by "
+                    f"work-project: {breakdown} — pick one up, or mark done / "
+                    f"remove if stale:\n"
                     + "\n".join(lines) + more + "\n</fable-open-tasks>")
         except Exception:
             pass
@@ -445,42 +786,51 @@ def run_hook(db_path: str, payload: dict) -> dict:
             "records_indexed": stats["records_indexed"]}
 
 
-def _compaction_recovery(db_path: str, session_id: str,
-                         limit: int = 10) -> str:
-    """Compaction summaries are lossy; fable's index is not. Re-inject the
-    decisions/outcomes of this session's own threads (the PreCompact hook
-    sealed them moments ago) so the model keeps what compaction erased."""
-    import json as _json
+def _compaction_recovery(db_path: str, session_id: str, limit: int = 18) -> str:
+    """Compaction is a CONTINUATION of the current work, so recovery comes ONLY
+    from THIS session's own threads — HARD-gated on session_id (one project's
+    transcript). Deliberately NO cross-session 'related' threads: feeding a
+    freshly-compacted model anything from another project would only lead it
+    astray. It hands the agent the last ~`limit` thread UUIDs and ENFORCES
+    reading each IN FULL via fable_thread (not the lossy summary, not the card
+    titles) — those threads ARE the working context. Includes uncarded recent
+    threads (the latest turns matter most and may not be carded yet)."""
     try:
         from fable import db as fdb
         conn = fdb.connect(db_path)
     except FileNotFoundError:
         return ""
     try:
-        rows = conn.execute(
-            "SELECT c.prompt_id, c.title, c.type, c.outcome, c.decisions "
-            "FROM cards c JOIN threads t ON t.prompt_id = c.prompt_id "
+        own = [r for r in conn.execute(
+            "SELECT t.prompt_id, c.title FROM threads t "
+            "LEFT JOIN cards c ON c.prompt_id = t.prompt_id "
             "WHERE t.session_id = ? ORDER BY t.last_ts DESC LIMIT ?",
-            (session_id, limit)).fetchall()
+            (session_id, limit)).fetchall() if r[0]]
     finally:
         conn.close()
-    if not rows:
+    if not own:
         return ""
-    lines = ["<fable-memory source=\"compaction-recovery\">",
-             "Compaction just summarized this session lossily. fable holds "
-             "the full-fidelity history; key context from THIS session:"]
-    for pid, title, ctype, outcome, decisions in rows:
-        lines.append(f"- [{ctype}] {title} — {outcome or ''} "
-                     f"(full recall: fable_thread {pid})")
-        try:
-            for d in _json.loads(decisions or "[]")[:2]:
-                lines.append(f"    decision: {d}")
-        except ValueError:
-            pass
-    lines.append("Retrieve anything verbatim via the fable_search / "
-                 "fable_thread tools.")
-    lines.append("</fable-memory>")
-    return "\n".join(lines)
+    L = ['<fable-memory source="compaction-recovery">',
+         "⚠ STOP — do NOT 'resume as if nothing happened'. The compaction note "
+         "above just told you to continue straight from the summary; here that "
+         "is WRONG. This session was COMPACTED and the summary is LOSSY — it "
+         "quietly dropped decisions, exact wording and open questions, so it "
+         "READS complete while you are in fact missing context. Re-reading the "
+         "real threads IS how you resume correctly — it is NOT a recap for the "
+         "user.",
+         f"⚠ Your FIRST action this turn — before any edit, answer, or line "
+         f"of code — MUST be fable_thread() on the {len(own)} threads below "
+         "(most recent first). Reading a source FILE is fine for code, but the "
+         "file does NOT carry the DECISIONS or what's settled-vs-still-open — "
+         "only these threads do, and that is exactly what the summary loses. "
+         "Skip none of the recent ones; trust the summary for NOTHING; for "
+         "anything older, fable_search — never guess.",
+         "\nTHIS SESSION'S LAST THREADS (most recent first — read IN FULL, now):"]
+    for pid, title in own:
+        L.append(f'- {title or "(latest — not yet carded)"}  '
+                 f'fable_thread("{pid}")')
+    L.append("</fable-memory>")
+    return "\n".join(L)
 
 
 def cmd_hook(args) -> int:

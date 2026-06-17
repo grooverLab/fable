@@ -138,6 +138,41 @@ CREATE TABLE IF NOT EXISTS thread_tags(
 CREATE INDEX IF NOT EXISTS idx_thread_tags_fv ON thread_tags(family, value);
 CREATE INDEX IF NOT EXISTS idx_thread_tags_prompt ON thread_tags(prompt_id);
 
+-- coined values the carder emitted for a STRICT controlled family that mapped
+-- to no enum value: held here for triage (promote into the enum / blacklist),
+-- never silently dropped — this is what lets the taxonomy keep evolving.
+CREATE TABLE IF NOT EXISTS tag_proposals(
+  family TEXT NOT NULL,
+  value TEXT NOT NULL,
+  prompt_id TEXT NOT NULL,
+  created_at TEXT,
+  status TEXT NOT NULL DEFAULT 'proposed',
+  PRIMARY KEY(family, value, prompt_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tag_proposals_fv ON tag_proposals(family, value);
+
+-- scout fire log: one row per thread the scout surfaced, marked `used` when the
+-- agent later opens that thread (fable_thread/block). Precision = used/fires;
+-- this is the loop that calibrates the confidence floor from real usage.
+CREATE TABLE IF NOT EXISTS scout_fires(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT, prompt_id TEXT, score_pct INTEGER,
+  query TEXT, created_at TEXT, used INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_scout_fires_pid ON scout_fires(prompt_id);
+
+-- learned entity dictionary (NER-lite): the scout's entity recognizer, built
+-- from what the carder already labels (tags + files + salient_entities). No
+-- model/training — it 'learns' by rebuilding on new cards (the nightly delta).
+CREATE TABLE IF NOT EXISTS ner_entities(
+  entity TEXT PRIMARY KEY,
+  kind TEXT,
+  freq INTEGER NOT NULL DEFAULT 1,
+  projects TEXT,
+  last_seen TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ner_entities_freq ON ner_entities(freq);
+
 CREATE TABLE IF NOT EXISTS citations(
   from_uuid TEXT NOT NULL,
   ref TEXT NOT NULL,
@@ -234,6 +269,8 @@ def connect(path: str, create: bool = False) -> sqlite3.Connection:
                 "ALTER TABLE cards ADD COLUMN gotchas TEXT",
                 "ALTER TABLE cards ADD COLUMN open_questions TEXT",
                 "ALTER TABLE cards ADD COLUMN directives TEXT",
+                "ALTER TABLE cards ADD COLUMN cues TEXT",
+                "ALTER TABLE cards ADD COLUMN salient_entities TEXT",
                 "ALTER TABLE cards ADD COLUMN card_gen INTEGER DEFAULT 1"):
         try:
             conn.execute(ddl)

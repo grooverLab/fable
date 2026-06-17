@@ -96,6 +96,96 @@ def cluster(items):
     return groups
 
 
+def _embed_cached(conn, canons):
+    """Embed each canonical text once, cached in `rule_vecs` (recompute only new
+    ones). {canon: vec} for those the backend could embed."""
+    import struct
+    from fable import embeddings as emb
+    conn.execute("CREATE TABLE IF NOT EXISTS rule_vecs("
+                 "canon TEXT PRIMARY KEY, vec BLOB, dim INT)")
+    uniq = list(dict.fromkeys(canons))
+    have = {}
+    for c in uniq:
+        row = conn.execute("SELECT vec, dim FROM rule_vecs WHERE canon=?",
+                           (c,)).fetchone()
+        if row:
+            have[c] = list(struct.unpack(f"{row[1]}f", row[0]))
+    missing = [c for c in uniq if c not in have]
+    for i in range(0, len(missing), 64):       # embed in chunks; tolerate failures
+        chunk = missing[i:i + 64]
+        try:
+            vecs = emb.embed_texts(chunk)
+        except Exception:
+            continue
+        for c, v in zip(chunk, vecs):
+            have[c] = v
+            conn.execute("INSERT OR REPLACE INTO rule_vecs(canon, vec, dim) "
+                         "VALUES(?,?,?)", (c, struct.pack(f"{len(v)}f", *v),
+                                           len(v)))
+    conn.commit()
+    return have
+
+
+def _merge_paraphrases(groups, conn, sim=0.80):
+    """Merge exact-canonical DIRECTIVE clusters that are semantic PARAPHRASES
+    (cosine >= sim) into one — so 'read the file before editing', 'read each file
+    first' and 'always read before you edit' count as ONE rule and can cross the
+    threshold. Greedy single-pass agglomeration (biggest first), embeddings
+    cached. Lessons/gotchas are left exact-canonical. No backend → unchanged."""
+    import math
+    try:
+        from fable import embeddings as emb
+        if not emb.backend():
+            return groups
+    except Exception:
+        return groups
+    dirs = [(canon, g) for (src, canon), g in groups.items()
+            if src == "directive"]
+    if len(dirs) < 2:
+        return groups
+    vecs = _embed_cached(conn, [c for c, _ in dirs])
+    norm = {c: (math.sqrt(sum(x * x for x in v)) or 1.0)
+            for c, v in vecs.items()}
+    order = sorted(range(len(dirs)), key=lambda i: -dirs[i][1]["n"])
+    reps = []            # [(rep_canon, rep_vec, [member indices])]
+    for i in order:
+        c = dirs[i][0]
+        v = vecs.get(c)
+        best, bj = sim, -1
+        if v is not None:
+            for j, (rc, rv, _) in enumerate(reps):
+                if rv is None:
+                    continue
+                cos = sum(a * b for a, b in zip(v, rv)) / (norm[c] * norm[rc])
+                if cos >= best:
+                    best, bj = cos, j
+        if bj >= 0:
+            reps[bj][2].append(i)
+        else:
+            reps.append((c, v, [i]))
+    merged = {k: v for k, v in groups.items() if k[0] != "directive"}
+    for rc, _rv, idxs in reps:
+        mg = {"texts": [], "pids": set(), "sessions": set(), "projects": set(),
+              "first": None, "last": None, "n": 0}
+        for i in idxs:
+            g = dirs[i][1]
+            mg["texts"] += g["texts"]
+            mg["n"] += g["n"]
+            mg["pids"] |= g["pids"]
+            mg["sessions"] |= g["sessions"]
+            mg["projects"] |= g["projects"]
+            if g["first"]:
+                mg["first"] = (g["first"] if mg["first"] is None
+                               else min(mg["first"], g["first"]))
+            if g["last"]:
+                mg["last"] = (g["last"] if mg["last"] is None
+                              else max(mg["last"], g["last"]))
+        # representative canon = the most-occurring member
+        rep = dirs[max(idxs, key=lambda i: dirs[i][1]["n"])][0]
+        merged[("directive", rep)] = mg
+    return merged
+
+
 def recluster(db_path, min_occ=3, min_sessions=2):
     """Read directives/lessons/gotchas from every card, cluster, upsert `rules`.
     Refreshes counts/evidence; preserves user triage status. Returns a summary."""
@@ -137,6 +227,7 @@ def recluster(db_path, min_occ=3, min_sessions=2):
             scanned += 1 if has else 0
 
         groups = cluster(items)
+        groups = _merge_paraphrases(groups, conn)   # merge directive paraphrases
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         candidates = 0
         written = 0
@@ -211,6 +302,35 @@ def read_rules(db_path, include_subthreshold=False):
         rules.append(d)
     return {"rules": rules, "by_status": by_status,
             "sources": dict(Counter(d["source"] for d in rules))}
+
+
+def render_rules(db_path, project=None):
+    """Phase 2 — ENFORCEMENT. The ACTIVE (user-approved) standing rules, as an
+    injectable block for the SessionStart hook: the directives the user has
+    repeated and approved, fed back so the agent obeys them from turn one
+    (instead of the user re-stating 'read the files' every session). Returns ''
+    if nothing is approved yet."""
+    try:
+        active = [r for r in read_rules(db_path).get("rules", [])
+                  if r.get("status") == "active"]
+    except Exception:
+        return ""
+    if project:
+        active = [r for r in active if not r.get("project")
+                  or project.lower() in (r.get("project") or "").lower()]
+    if not active:
+        return ""
+    active.sort(key=lambda r: -(r.get("occurrence_count") or 0))
+    lines = ["<fable-rules>",
+             "STANDING RULES you set across past sessions and approved — follow "
+             "them as if stated this session; they are not optional:"]
+    for r in active:
+        txt = (r.get("display_text") or r.get("canonical_text") or "").strip()
+        if txt:
+            n = r.get("occurrence_count") or 0
+            lines.append(f"- {txt}" + (f"  (you've said this {n}×)" if n else ""))
+    lines.append("</fable-rules>")
+    return "\n".join(lines)
 
 
 def triage(db_path, rule_id, action, text=None, scope=None):

@@ -24,10 +24,12 @@ _HC_SPAN = re.compile(
     r"<historical_context\b[^>]*>.*?(?:</historical_context>|\Z)",
     re.IGNORECASE | re.DOTALL)
 _ATTR = re.compile(r'(\w+)="([^"]*)"')
-# fable's own injected directives (e.g. the externalisation reminder) must
-# never enter the index — strip them like recalled-memory spans
+# anything fable itself injects (the externalisation reminder, the proactive
+# <fable-scout> teaser, <fable-open-tasks>, <fable-memory> recovery) must NEVER
+# enter the index — else a memory tags a memory → exponential bloat. Strip every
+# <fable-…> span the way recalled-memory spans are stripped.
 _FABLE_DIRECTIVE = re.compile(
-    r"<fable-externalize\b[^>]*>.*?(?:</fable-externalize>|\Z)",
+    r"<fable-[a-z0-9-]+\b[^>]*>.*?(?:</fable-[a-z0-9-]+>|\Z)",
     re.IGNORECASE | re.DOTALL)
 
 

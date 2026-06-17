@@ -12,3 +12,9 @@ reference/
 /tmp/
 build/
 *.egg-info/
+
+# brainstorm visual companion working files
+.superpowers/
+
+# V.A.U.L.T. UI-rebuild — local only, never pushed (dev or public)
+UI-rebuild/

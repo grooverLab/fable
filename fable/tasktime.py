@@ -288,7 +288,7 @@ _META_DDL = "CREATE TABLE IF NOT EXISTS tasks_meta (key TEXT PRIMARY KEY, value 
 # so materialize()'s DELETE+INSERT never clobbers a user's edits.
 _OVERLAY_DDL = """CREATE TABLE IF NOT EXISTS task_meta (
     session TEXT, task_id INTEGER, removed INTEGER DEFAULT 0,
-    priority INTEGER, note TEXT, updated_ts TEXT,
+    priority INTEGER, note TEXT, done INTEGER DEFAULT 0, updated_ts TEXT,
     PRIMARY KEY (session, task_id))"""
 
 
@@ -343,9 +343,15 @@ def read(db_path, rebuild_if_empty=True):
         conn.execute(_TASKS_DDL)
         conn.execute(_META_DDL)
         conn.execute(_OVERLAY_DDL)
+        try:   # overlay migration: user mark-done flag
+            conn.execute("ALTER TABLE task_meta ADD COLUMN done INTEGER "
+                         "DEFAULT 0")
+        except Exception:
+            pass
         rows = conn.execute(
             "SELECT t.session,t.task_id,t.ts,t.project,t.subject,t.status,"
-            "t.drifted,t.interp,t.prompt_id,t.source,m.priority,m.note "
+            "t.drifted,t.interp,t.prompt_id,t.source,m.priority,m.note,"
+            "COALESCE(m.done,0) "
             "FROM tasks t LEFT JOIN task_meta m "
             "ON m.session=t.session AND m.task_id=t.task_id "
             "WHERE COALESCE(m.removed,0)=0").fetchall()
@@ -359,9 +365,11 @@ def read(db_path, rebuild_if_empty=True):
         materialize(db_path)
         return read(db_path, rebuild_if_empty=False)
     tasks = [{"session": r[0], "id": r[1], "ts": r[2], "project": r[3],
-              "subject": r[4], "status": r[5], "drifted": bool(r[6]),
+              "subject": r[4], "status": "completed" if r[12] else r[5],
+              "drifted": bool(r[6]) and not r[12],
               "interp": bool(r[7]), "prompt_id": r[8], "source": r[9],
-              "priority": r[10], "note": r[11]} for r in rows]
+              "priority": r[10], "note": r[11], "done": bool(r[12])}
+             for r in rows]
     # priority first (P0=0 highest, nulls last), then chronological
     tasks.sort(key=lambda t: (t["priority"] is None,
                               t["priority"] if t["priority"] is not None else 0,
@@ -396,8 +404,17 @@ def open_for_project(db_path, project, limit=8):
     try:
         conn.execute(_TASKS_DDL)
         conn.execute(_OVERLAY_DDL)
+        try:
+            conn.execute("ALTER TABLE task_meta ADD COLUMN done INTEGER "
+                         "DEFAULT 0")
+        except Exception:
+            pass
+        # the SessionStart reminder is about ACTIONABLE tasks — Task calls +
+        # inline checkboxes — NOT the carder's ideas/features wishlist, and not
+        # ones the user marked done. (Ideas/Features live in their own tabs.)
         where = ("(t.cwd=? OR t.project=?) AND t.drifted=1 "
-                 "AND COALESCE(m.removed,0)=0")
+                 "AND COALESCE(m.removed,0)=0 AND COALESCE(m.done,0)=0 "
+                 "AND t.source IN ('task','inline')")
         join = ("FROM tasks t LEFT JOIN task_meta m "
                 "ON m.session=t.session AND m.task_id=t.task_id")
         rows = conn.execute(

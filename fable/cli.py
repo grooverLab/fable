@@ -418,6 +418,14 @@ def build_parser():
     cs.add_argument("prompt_id")
     sp.set_defaults(fn=cmd_cards)
 
+    sp = sub.add_parser("ner", help="entity dictionary — the scout's recognizer,"
+                                    " (re)built from the carder's labels")
+    nsub = sp.add_subparsers(dest="ner_cmd", required=True)
+    nsub.add_parser("build", help="(re)build the dictionary from all cards")
+    nsub.add_parser("show", help="top entities by frequency")
+    sp.set_defaults(fn=lambda a: __import__(
+        "fable.ner", fromlist=["cmd_ner"]).cmd_ner(a))
+
     sp = sub.add_parser("prune", help="prune a live transcript (v2)")
     sp.add_argument("input", help="live transcript path")
     sp.add_argument("--mode", choices=["resume", "extract", "handoff"],
