@@ -594,18 +594,32 @@ def _mark_scout_conversion(db_path, payload):
         pass
 
 
+def _scout_hold(db_path, prompt, reason):
+    """Record WHY the scout stayed silent — the invisible 'held' path made
+    visible for diagnosis. Fires log to scout_fires; holds log to hook.log so a
+    live turn can be inspected ('immature_project' / 'below_floor(best=68/70)' /
+    'no_entity_no_deixis' / 'error:…')."""
+    try:
+        _log(db_path, json.dumps({"scout_held": reason,
+                                  "prompt": (prompt or "")[:90]}))
+    except Exception:
+        pass
+    return ""
+
+
 def _scout(db_path, payload):
     """Staged proactive-recall gate. Returns a <fable-scout> teaser or ''."""
     prompt = (payload.get("prompt") or "").strip()
     if len(prompt) < 12 or _ACK_RE.match(prompt):              # Stage 0
-        return ""
+        return _scout_hold(db_path, prompt, "short_or_ack")
     deixis = bool(_DEIXIS_RE.search(prompt))
     entities = _scout_entities(db_path, prompt)                # Stage 1
     if not deixis and not entities:
-        return ""
+        return _scout_hold(db_path, prompt, "no_entity_no_deixis")
     project = _scout_project(payload)
     if not _project_mature(db_path, project):                  # activation gate
-        return ""
+        return _scout_hold(db_path, prompt,
+                           "immature_project:%s" % (project or "?"))
     try:
         from fable.recall import scout_search, scout_vector_search, resume
         if entities:                                           # Stage 2 retrieve
@@ -637,7 +651,11 @@ def _scout(db_path, payload):
                 if not cur or (h.get("score_pct") or 0) > (cur.get("score_pct") or 0):
                     best[h["prompt_id"]] = h
             if not best:
-                return ""
+                raw = [(h.get("score_pct") or 0) for h in (vec + lex)]
+                return _scout_hold(db_path, prompt,
+                                   "below_floor(best=%d/%d,ent=%s)" % (
+                                       max(raw) if raw else 0, _SCOUT_FLOOR,
+                                       ",".join(entities[:3])))
             keep = sorted(best.values(), key=lambda h: -(  # soft project boost:
                 (h.get("score_pct") or 0)                  # local outranks a
                 + (15 if project and project.lower() in     # comparable global,
@@ -650,7 +668,7 @@ def _scout(db_path, payload):
                            project=os.path.basename(cwd) if cwd else None),
             _SCOUT_TIMEOUT_S)
         if not r or not r.get("found") or not r.get("recent_threads"):
-            return ""
+            return _scout_hold(db_path, prompt, "resume_empty")
         return _scout_resume_teaser(r)
     except Exception:
         return ""
@@ -660,6 +678,26 @@ def run_hook(db_path: str, payload: dict) -> dict:
     transcript = payload.get("transcript_path")
     event = payload.get("hook_event_name", "?")
     session = payload.get("session_id", "?")
+
+    if event == "PreToolUse":
+        # graph: before an Edit/Write, inject the target file's BLAST RADIUS —
+        # the past threads + decisions that touched it — so the model doesn't
+        # relitigate a settled call or repeat a known trap. Silent when the file
+        # has no recorded history (no nagging on greenfield files).
+        tool = payload.get("tool_name") or ""
+        if tool in ("Edit", "Write", "MultiEdit"):
+            inp = payload.get("tool_input") or {}
+            fp = inp.get("file_path") or inp.get("path") or ""
+            if fp:
+                try:
+                    from fable.graph import render_blast_radius
+                    block = render_blast_radius(db_path, fp)
+                    if block:
+                        return {"ok": True, "event": "PreToolUse",
+                                "inject": block}
+                except Exception:
+                    pass
+        return {"ok": True, "event": "PreToolUse"}
 
     if event == "PostToolUse":
         result = _post_tool(payload)
@@ -689,8 +727,8 @@ def run_hook(db_path: str, payload: dict) -> dict:
             teaser = _scout(db_path, payload)
             if teaser:
                 parts.append(teaser)
-        except Exception:
-            pass
+        except Exception as e:
+            _log(db_path, json.dumps({"scout_error": str(e)[:160]}))
         if parts:
             result["inject"] = "\n\n".join(parts)
             result["event"] = "UserPromptSubmit"

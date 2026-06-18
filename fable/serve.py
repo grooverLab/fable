@@ -410,176 +410,103 @@ def api_diff(db_path, params):
 
 
 def api_graph(db_path, params):
-    """Memory graph v2 — built from signals that actually exist:
-    thread nodes (always labeled), FILE nodes (paths threads edited),
-    TOPIC nodes (LLM card topics), semantic edges (embedding cosine),
-    citations. TF-IDF trigram terms are gone; wikilinks kept if present."""
-    session = (params.get("session") or [None])[0]
-    cap = int((params.get("cap") or ["120"])[0])
+    """Memory graph v3 — typed/directed/weighted over gnodes/edges, the SAME
+    structure the agent queries (fable_neighbors / blast_radius). Readable by
+    construction, not a hairball: a node-type lens (default = the provenance
+    skeleton so entity nodes don\'t swamp it), an optional 2-hop ego center, an
+    edge-level lens, a degree cap, isolated nodes dropped. Params: center,
+    types(csv), levels(csv), cap."""
+    def _p(k, d=None):
+        v = params.get(k)
+        return v[0] if v else d
+    center = _p("center")
+    cap = max(20, min(int(_p("cap", "220") or 220), 600))
+    types = _p("types", "thread,file,decision,project")
+    type_set = {t.strip() for t in (types or "").split(",") if t.strip()}
+    # default to the HIERARCHY (down/up = thread→file/decision/project tree); the
+    # peer file↔file co_change mesh is the density driver, so it's off unless
+    # explicitly requested (levels=peer) — keeps the default a readable tree.
+    level_set = {l.strip() for l in (_p("levels", "down,up") or "").split(",")
+                 if l.strip()}
     conn = fdb.connect(db_path)
     try:
-        scope_sql = "SELECT prompt_id FROM threads"
-        scope_args = []
-        if session:
-            scope_sql += " WHERE session_id = ?"
-            scope_args.append(session)
-        scope_sql += " ORDER BY est_tokens DESC LIMIT ?"
-        scope_args.append(cap)
-        pids = [r[0] for r in conn.execute(scope_sql, scope_args)]
-        if not pids:
-            return {"nodes": [], "links": []}
-        ph = ",".join("?" * len(pids))
+        from fable import graph as G
+        G.ensure_schema(conn)
+        nmeta = {nid: (typ, label, ref) for nid, typ, label, ref in
+                 conn.execute("SELECT id, type, label, ref FROM gnodes")}
 
-        threads = _rows(conn, f"""
-            SELECT t.prompt_id, t.est_tokens, t.turn_count, t.first_ts,
-                   t.session_id, c.title, c.type, c.topics
-            FROM threads t LEFT JOIN cards c ON c.prompt_id = t.prompt_id
-            WHERE t.prompt_id IN ({ph})""", pids)
-        # every thread gets a human label: card title, else its first
-        # user words from FTS
-        untitled = [t["prompt_id"] for t in threads if not t["title"]]
-        first_words = {}
-        if untitled:
-            uph = ",".join("?" * len(untitled))
-            for pid, content in conn.execute(f"""
-                    SELECT prompt_id, content FROM fts
-                    WHERE prompt_id IN ({uph}) AND kind LIKE '%text%'
-                    """, untitled):
-                if pid not in first_words and content:
-                    first_words[pid] = content.strip().split("\n")[0][:60]
+        def keep_type(nid):
+            t = (nmeta.get(nid) or ("",))[0]
+            return (not type_set) or t in type_set
 
-        nodes, links = [], []
-        for t in threads:
-            nodes.append({
-                "id": t["prompt_id"], "group": "thread",
-                "label": (t["title"] or first_words.get(t["prompt_id"])
-                          or t["prompt_id"][:8]),
-                "type": t["type"], "tokens": t["est_tokens"],
-                "turns": t["turn_count"], "carded": bool(t["title"])})
+        eq, ea = "SELECT src, dst, rel, level, weight FROM edges", []
+        if level_set:
+            eq += " WHERE level IN (%s)" % ",".join("?" * len(level_set))
+            ea = list(level_set)
+        edges = [e for e in conn.execute(eq, ea)
+                 if keep_type(e[0]) and keep_type(e[1])]
 
-        # ── FILE nodes: path-shaped targets, df 2..50 ──
-        file_rows = _rows(conn, f"""
-            SELECT term, prompt_id, score FROM terms
-            WHERE kind = 'target' AND prompt_id IN ({ph})""", pids)
-        by_file = {}
-        for fr in file_rows:
-            by_file.setdefault(fr["term"], []).append(fr)
-        shared_files = sorted(
-            ((k, v) for k, v in by_file.items() if 2 <= len(v) <= 50),
-            key=lambda kv: -len(kv[1]))[:60]
-        for path, rows in shared_files:
-            nid = f"file:{path}"
-            nodes.append({"id": nid, "group": "file",
-                          "label": path.split("/")[-1], "full": path,
-                          "df": len(rows)})
-            for fr in rows:
-                links.append({"source": fr["prompt_id"], "target": nid,
-                              "kind": "file",
-                              "weight": min(fr["score"], 10)})
+        # SCOPE the graph: a center node (ego), OR all threads in a session /
+        # work-project — so one view never leaks in unrelated projects.
+        seeds = set()
+        if center:
+            res = G._resolve_node(conn, center)
+            if res:
+                seeds = {res[0]}
+        else:
+            session = _p("session")
+            project = _p("project")
+            if session:
+                seeds = {f"thread:{r[0]}" for r in conn.execute(
+                    "SELECT prompt_id FROM threads WHERE session_id=?",
+                    (session,))}
+            elif project:
+                try:
+                    from fable import tasktime
+                    wp = tasktime.work_projects(db_path, conn)
+                except Exception:
+                    wp = {}
+                cwdp = dict(conn.execute(
+                    "SELECT session_id, project FROM sessions"))
+                pl = project.lower()
+                for pid, sid in conn.execute(
+                        "SELECT prompt_id, session_id FROM threads"):
+                    p = wp.get(sid) or cwdp.get(sid) or ""
+                    if pl in p.lower():
+                        seeds.add(f"thread:{pid}")
+        if seeds:                                    # 2-hop ego from the seeds
+            adj = {}
+            for s, d, *_ in edges:
+                adj.setdefault(s, set()).add(d)
+                adj.setdefault(d, set()).add(s)
+            seen, frontier = set(seeds), list(seeds)
+            for _ in range(2):
+                nxt = []
+                for n in frontier:
+                    for m in adj.get(n, ()):
+                        if m not in seen:
+                            seen.add(m)
+                            nxt.append(m)
+                frontier = nxt
+            edges = [e for e in edges if e[0] in seen and e[1] in seen]
 
-        # ── TOPIC nodes: LLM-chosen card topics, df>=2 ──
-        topics = {}
-        for t in threads:
-            try:
-                for topic in json.loads(t["topics"] or "[]"):
-                    topic = str(topic).strip().lower()[:40]
-                    if topic:
-                        topics.setdefault(topic, set()).add(t["prompt_id"])
-            except ValueError:
-                pass
-        for topic, members in sorted(topics.items(),
-                                     key=lambda kv: -len(kv[1]))[:50]:
-            if len(members) < 2:
-                continue
-            nid = f"topic:{topic}"
-            nodes.append({"id": nid, "group": "topic", "label": topic,
-                          "df": len(members)})
-            for pid in members:
-                links.append({"source": pid, "target": nid,
-                              "kind": "topic", "weight": 3})
-
-        # ── TAG nodes: carder taxonomy tags, df>=2 (family:value co-occurrence) ──
-        tag_members = {}
-        for fam, val, pid in conn.execute(f"""
-                SELECT family, value, prompt_id FROM thread_tags
-                WHERE prompt_id IN ({ph})""", pids):
-            tag_members.setdefault((fam, val), set()).add(pid)
-        for (fam, val), members in sorted(tag_members.items(),
-                                          key=lambda kv: -len(kv[1]))[:60]:
-            if len(members) < 2:
-                continue
-            nid = f"tag:{fam}:{val}"
-            nodes.append({"id": nid, "group": "tag",
-                          "label": f"{fam}:{val}", "family": fam,
-                          "df": len(members)})
-            for pid in members:
-                links.append({"source": pid, "target": nid,
-                              "kind": "tag", "weight": 3})
-
-        # ── wikilinks (first-class when present; top 60 by spread so a
-        # tag-happy archive can't bury the graph) ──
-        wl = {}
-        for term, pid, score in conn.execute(f"""
-                SELECT term, prompt_id, score FROM terms
-                WHERE kind = 'wikilink' AND prompt_id IN ({ph})""", pids):
-            wl.setdefault(term, []).append(pid)
-        for term, wpids in sorted(wl.items(),
-                                  key=lambda kv: -len(kv[1]))[:60]:
-            nid = f"wiki:{term}"
-            nodes.append({"id": nid, "group": "wikilink",
-                          "label": f"[[{term}]]", "df": len(wpids)})
-            for pid in wpids:
-                links.append({"source": pid, "target": nid,
-                              "kind": "wikilink", "weight": 4})
-
-        # ── semantic edges: embedding cosine between carded threads ──
-        try:
-            import struct
-            vecs = {}
-            for pid, blob, dim in conn.execute(f"""
-                    SELECT prompt_id, vec, dim FROM embeddings
-                    WHERE prompt_id IN ({ph})""", pids):
-                vecs[pid] = struct.unpack(f"{dim}f", blob)
-            keys = list(vecs)
-            for i, a in enumerate(keys):
-                va = vecs[a]
-                na = sum(x * x for x in va) ** 0.5 or 1
-                best = []
-                for b in keys[i + 1:]:
-                    vb = vecs[b]
-                    nb = sum(x * x for x in vb) ** 0.5 or 1
-                    cos = sum(x * y for x, y in zip(va, vb)) / (na * nb)
-                    if cos > 0.72:
-                        best.append((cos, b))
-                for cos, b in sorted(best, reverse=True)[:3]:
-                    links.append({"source": a, "target": b,
-                                  "kind": "semantic",
-                                  "weight": round(cos * 10, 1)})
-        except Exception:
-            pass
-
-        # ── citations ──
-        cites = _rows(conn, f"""
-            SELECT DISTINCT r.prompt_id AS src, ci.ref AS dst
-            FROM citations ci JOIN records r ON r.uuid = ci.from_uuid
-            WHERE r.prompt_id IN ({ph})""", pids)
-        ids = {n["id"] for n in nodes}
-        for c in cites:
-            if c["src"] in ids and c["dst"] in ids:
-                links.append({"source": c["src"], "target": c["dst"],
-                              "kind": "citation", "weight": 5})
-
-        # drop isolated thread nodes — the sparse feel came from singletons
-        degree = {}
-        for l in links:
-            degree[l["source"]] = degree.get(l["source"], 0) + 1
-            degree[l["target"]] = degree.get(l["target"], 0) + 1
-        nodes = [n for n in nodes
-                 if degree.get(n["id"]) or n["group"] != "thread"]
-        ids = {n["id"] for n in nodes}
-        links = [l for l in links
-                 if l["source"] in ids and l["target"] in ids]
-        return {"nodes": nodes, "links": links}
+        deg = {}
+        for s, d, *_ in edges:
+            deg[s] = deg.get(s, 0) + 1
+            deg[d] = deg.get(d, 0) + 1
+        keep = set(sorted(deg, key=lambda n: -deg[n])[:cap])
+        links = [{"source": s, "target": d, "kind": rel, "level": lv,
+                  "weight": round(w, 1)}
+                 for s, d, rel, lv, w in edges if s in keep and d in keep]
+        nodes = []
+        for nid in keep:
+            t, label, ref = nmeta.get(nid, ("?", nid, None))
+            nodes.append({"id": nid, "group": t, "label": label, "ref": ref,
+                          "df": deg.get(nid, 0)})
+        return {"nodes": nodes, "links": links,
+                "meta": {"shown": len(nodes), "total": len(deg),
+                         "center": center, "types": sorted(type_set),
+                         "cap": cap}}
     finally:
         conn.close()
 
@@ -1238,6 +1165,8 @@ def post_settings(db_path, body):
         meta["recard_mode"] = "1" if body["recard_mode"] else "0"
     if "externalize_enabled" in body:
         meta["externalize_enabled"] = "1" if body["externalize_enabled"] else "0"
+    if "http_mcp" in body:
+        meta["http_mcp"] = "1" if body["http_mcp"] else "0"
     if not updates and not meta:
         raise ValueError("nothing to save")
     if updates:
@@ -1285,7 +1214,7 @@ def api_settings(db_path, params):
         cfg = dict(conn.execute(
             "SELECT key, value FROM meta WHERE key IN "
             "('autoprune_enabled','autoprune_pct','recard_mode',"
-            "'externalize_enabled')").fetchall())
+            "'externalize_enabled','http_mcp')").fetchall())
     finally:
         conn.close()
     from fable import paths
@@ -1298,11 +1227,29 @@ def api_settings(db_path, params):
             "autoprune_pct": float(cfg.get("autoprune_pct") or 80),
             "recard_mode": cfg.get("recard_mode") == "1",
             "externalize_enabled": cfg.get("externalize_enabled") != "0",
+            "http_mcp": cfg.get("http_mcp") == "1",
             "storage": {"home": paths.home(), "db": db_path,
                         "vault": paths.vault_dir(),
                         "checkpoints": paths.checkpoints_dir(),
                         "config": paths.config_path(),
                         "backup_roots": paths.backup_roots()}}
+
+
+def _http_mcp_on(db_path):
+    """HTTP MCP transport is OPT-IN (default off) — it exposes every fable tool
+    over HTTP, so the user enables it from the dashboard Settings only when
+    needed. The per-session stdio MCP that Claude uses is separate and always
+    on, unaffected by this flag."""
+    try:
+        conn = fdb.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='http_mcp'").fetchone()
+        finally:
+            conn.close()
+        return bool(row) and row[0] == "1"
+    except Exception:
+        return False
 
 
 def api_backfill_progress(db_path, params):
@@ -1973,9 +1920,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_mcp(self):
         """Stateless MCP Streamable-HTTP transport — same tools as `fable mcp`
-        (stdio), but hosted in the dashboard so one launch brings up every
-        service. Delegates each JSON-RPC message to mcp.handle()."""
+        (stdio), but hosted in the dashboard. OPT-IN: returns 403 unless enabled
+        in Settings (it exposes every tool over HTTP). The per-session stdio MCP
+        Claude uses is separate and unaffected. Delegates to mcp.handle()."""
         from fable import mcp as _mcp
+        if not _http_mcp_on(self.db_path):
+            self._send(403,
+                       b'{"jsonrpc":"2.0","id":null,"error":{"code":-32000,'
+                       b'"message":"HTTP MCP is disabled. Enable it in the '
+                       b'dashboard Settings (the stdio MCP is unaffected)."}}',
+                       "application/json")
+            return
         try:
             length = int(self.headers.get("Content-Length", 0))
             payload = json.loads(self.rfile.read(length) or b"{}")
@@ -2066,10 +2021,12 @@ def _discover_loop(db_path):
     import time as _t
     seen = _project_files()
     boot = True
+    ticks = 0
     while True:
         try:
             now = _project_files()
-            if boot or (now - seen):          # only on a NEW session file
+            newsess = boot or bool(now - seen)
+            if newsess:                       # only on a NEW session file
                 from fable.discover import discover
                 discover(db_path)
                 seen = now
@@ -2077,6 +2034,12 @@ def _discover_loop(db_path):
             from fable.embeddings import embed_cards, backend
             if backend():
                 embed_cards(db_path)          # incremental; no-op when nothing new
+            ticks += 1
+            # refresh the blast-radius graph on a new session, and every ~5 min
+            # so the re-card's growing decisions/files enter it (3s, negligible)
+            if newsess or ticks % 15 == 0:
+                from fable.graph import build_edges
+                build_edges(db_path)
         except Exception:
             pass
         _t.sleep(_DISCOVER_INTERVAL)

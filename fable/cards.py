@@ -44,15 +44,20 @@ these fields:
   "features": specific capabilities proposed to build later but not built in
            this thread; one concise sentence each (empty list if none)
   "lessons": things learned that should change future behaviour, each phrased
-           "X, so do Y" (empty list if none)
-  "gotchas": non-obvious traps or surprises that cost effort here and would
-           recur; one concise sentence each (empty list if none)
+           "X, so do Y" where Y is the REAL, concrete action — NEVER a
+           placeholder ("so do X", "do X", "TODO", a single letter). If you
+           cannot state the actual action, omit the lesson. (empty if none)
+  "gotchas": non-obvious traps that cost effort here and would recur — name the
+           actual trap and its effect, NEVER a placeholder. (empty if none)
   "open_questions": substantive questions raised but left unresolved / TBD
            (empty list if none)
-  "directives": standing rules or preferences the USER stated for how they want
-           work done — judged by meaning, in any phrasing or language; each a
-           concise imperative. Only what the user instructed (NOT what you
-           decided, and NOT what was learned). Empty list if none.
+  "directives": standing rules the USER stated for how they want work done —
+           each a SPECIFIC, self-contained imperative. NEVER a meta-pointer
+           like "follow the rules" / "adhere to the guidelines" / "do as
+           instructed" — those reference rules without being one. If the user
+           gave a LIST of rules, extract each rule SEPARATELY, not the wrapper.
+           Only what the user instructed (NOT what you decided or learned).
+           Empty list if none.
   "files": file paths or components touched (empty list if none)
   "outcome": one line: how the thread ended (done/abandoned/blocked/...)
   "summary": 2-4 sentences, concrete, naming real identifiers
@@ -81,6 +86,9 @@ these fields:
           over Y) — not a bug fix or a routine activity.
 
 {taxonomy}
+Before responding, re-read your "lessons", "gotchas" and "directives": drop any
+entry whose action is a placeholder (e.g. "so do X"), any vacuous "follow the
+rules" directive, and anything that names no concrete thing.
 Respond with ONLY the JSON object. No markdown fences, no commentary.
 
 <transcript-data>
@@ -140,9 +148,167 @@ def parse_card(text: str) -> dict:
     return card
 
 
+# ── quality gate for the rule-like fields (lessons / gotchas / directives) ────
+# Two layers on top of the hardened prompt: a tiny DETERMINISTIC tripwire for
+# objectively-broken output (empty / literal placeholder), then a strict LLM
+# CRITIC (temperature 0) for the semantic calls (vague / vacuous meta-rule).
+# Flagged entries get ONE repair re-prompt; anything still broken is dropped —
+# a missing lesson beats a stored placeholder. Everything is wrapped: a gate
+# failure NEVER breaks carding (the card passes through unchanged).
+import re as _re
+
+# EVERY field gated for quality/format. Rule-fields also get the placeholder
+# tripwire; the rest are judged by the critic against their required shape.
+_GATED_FIELDS = ("lessons", "gotchas", "directives", "decisions", "cues",
+                 "salient_entities")
+_RULE_FIELDS = ("lessons", "gotchas", "directives")
+# rewriteable (a repair re-prompt can reshape them) vs drop-only (a generic cue
+# or entity can't be made specific without the thread — flag → just drop it)
+_REPAIR_FIELDS = ("lessons", "gotchas", "directives", "decisions")
+_DROP_ONLY_FIELDS = ("cues", "salient_entities")
+# literal stubs only — semantic judgments are the critic's job, not regex
+_PLACEHOLDER_RE = _re.compile(r"\bso do x\b|\bdo x\b|\b(?:todo|tbd|xxx)\b", _re.I)
+
+
+def _structural_drops(card):
+    """Deterministic tripwire — flags ONLY objectively-broken entries: any empty
+    entry, or a literal placeholder ('so do X', 'TODO') in a rule-field. Every
+    semantic call (vague decision, generic cue/entity) is the critic's job.
+    Returns {(field, index)}."""
+    drops = set()
+    for f in _GATED_FIELDS:
+        for i, x in enumerate(card.get(f) or []):
+            t = str(x).strip()
+            if not t:
+                drops.add((f, i))
+            elif f in _RULE_FIELDS and (len(t) < 8 or _PLACEHOLDER_RE.search(t)):
+                drops.add((f, i))
+    return drops
+
+
+_CRITIC_PROMPT = """You are a strict validator. Below are several fields of a
+memory card. For EACH field flag entries that DON'T meet its rule:
+ - "directives": a SPECIFIC standing rule — flag vacuous meta-pointers
+   ("follow the rules / instructions / guidelines").
+ - "lessons": "X, so do Y" with a REAL action — flag placeholders ("so do X").
+ - "gotchas": a concrete trap and its effect — flag placeholders or vagueness.
+ - "decisions": "chose X over Y because Z" — flag any not stating a real choice
+   with a reason.
+ - "cues": a natural user question/request using DISTINCTIVE nouns — flag
+   generic ones ("what did we do", "fix the bug") with no specific subject.
+ - "salient_entities": a SPECIFIC identifier / file / component — flag generic
+   words ("function", "data", "code", "file", "system", "thread").
+Reply with ONLY this JSON: {{"drop": [{{"field": "cues", "index": 0}}]}} —
+field+index for each entry to drop; an empty "drop" list if all are fine.
+
+{payload}"""
+
+
+def _critic_drops(card, provider, **chat_kw):
+    """Strict LLM critic (temperature 0) → {(field, index)} to drop. Safe-fail:
+    any error returns an empty set (never block a card on a flaky judge call)."""
+    from fable.providers import complete
+    payload = json.dumps({f: (card.get(f) or []) for f in _GATED_FIELDS}, indent=1)
+    kw = dict(chat_kw)
+    kw["max_tokens"] = 500
+    kw["temperature"] = 0
+    try:
+        obj = _first_json_object(complete(
+            _CRITIC_PROMPT.format(payload=payload), provider=provider, **kw))
+    except Exception:
+        return set()
+    drops = set()
+    for d in (obj or {}).get("drop") or []:
+        f, i = d.get("field"), d.get("index")
+        if f in _GATED_FIELDS and isinstance(i, int):
+            drops.add((f, i))
+    return drops
+
+
+_REPAIR_PROMPT = """These extracted items are broken (placeholder actions,
+vagueness, or "follow the rules" meta-pointers). Rewrite each into ONE clear,
+specific statement, OR omit any you cannot state concretely. Reply with ONLY a
+JSON object mapping the SAME field names to the corrected lists:
+
+{items}"""
+
+
+def _repair(card, drops, provider, **chat_kw):
+    """One repair re-prompt for the flagged entries; rebuild each flagged field
+    = (entries that were fine) + (repaired, non-empty entries)."""
+    from fable.providers import complete
+    flagged = {f: [str(card[f][i]) for (ff, i) in sorted(drops)
+                   if ff == f and i < len(card.get(f) or [])]
+               for f in _GATED_FIELDS}
+    flagged = {f: v for f, v in flagged.items() if v}
+    if not flagged:
+        return card
+    kw = dict(chat_kw)
+    kw["max_tokens"] = 1024
+    kw["temperature"] = 0
+    try:
+        fixed = _first_json_object(complete(
+            _REPAIR_PROMPT.format(items=json.dumps(flagged, indent=1)),
+            provider=provider, **kw)) or {}
+    except Exception:
+        fixed = {}
+    for f in flagged:
+        bad = {i for (ff, i) in drops if ff == f}
+        kept = [x for i, x in enumerate(card.get(f) or []) if i not in bad]
+        repaired = [str(x).strip() for x in (fixed.get(f) or [])
+                    if str(x).strip()]
+        card[f] = kept + repaired
+    return card
+
+
+def validate_card(card, provider="openrouter", **chat_kw):
+    """Gate ALL quality fields (lessons/gotchas/directives/decisions/cues/
+    salient_entities): structural tripwire + per-field LLM critic flag broken
+    entries; one repair re-prompt; a final deterministic sweep. Stashes a
+    per-field report on card['_quality'] (generated/flagged/final) for
+    measurement. Runs only when the card HAS gated fields. NEVER raises — on any
+    error the card passes through unchanged (carding > the gate)."""
+    gen = {f: len(card.get(f) or []) for f in _GATED_FIELDS}
+    flagged = {f: 0 for f in _GATED_FIELDS}
+    try:
+        if any(card.get(f) for f in _GATED_FIELDS):
+            drops = (_structural_drops(card)
+                     | _critic_drops(card, provider, **chat_kw))
+            for (f, _i) in drops:
+                flagged[f] = flagged.get(f, 0) + 1
+            # drop-only fields: a flagged cue/entity is generic — just drop it
+            for f in _DROP_ONLY_FIELDS:
+                bad = {i for (ff, i) in drops if ff == f}
+                if bad:
+                    card[f] = [x for i, x in enumerate(card.get(f) or [])
+                               if i not in bad]
+            # rewriteable fields: one repair re-prompt, then a structural sweep
+            rep = {(f, i) for (f, i) in drops if f in _REPAIR_FIELDS}
+            if rep:
+                card = _repair(card, rep, provider, **chat_kw)
+                for f in _REPAIR_FIELDS:
+                    bad = {i for (ff, i) in _structural_drops(card) if ff == f}
+                    if bad:
+                        card[f] = [x for i, x in enumerate(card.get(f) or [])
+                                   if i not in bad]
+    except Exception:
+        pass
+    card["_quality"] = {f: {"generated": gen[f], "flagged": flagged[f],
+                            "final": len(card.get(f) or [])}
+                        for f in _GATED_FIELDS}
+    return card
+
+
 def store_card(conn, prompt_id: str, card: dict, source: str, model: str,
                est_tokens=None):
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    _q = card.pop("_quality", None)            # quality report → metrics table
+    if _q is not None:
+        conn.execute("CREATE TABLE IF NOT EXISTS card_quality(prompt_id TEXT "
+                     "PRIMARY KEY, ts TEXT, model TEXT, gen INT, report TEXT)")
+        conn.execute("INSERT OR REPLACE INTO card_quality(prompt_id, ts, model, "
+                     "gen, report) VALUES(?,?,?,?,?)",
+                     (prompt_id, now, model, CARDER_GEN, json.dumps(_q)))
     conn.execute(
         "INSERT OR REPLACE INTO cards(prompt_id, title, type, topics,"
         " decisions, ideas, features, lessons, gotchas, open_questions,"
@@ -217,11 +383,12 @@ def generate_card(db_path: str, prompt_id: str, provider="openrouter",
                            taxonomy=taxonomy.prompt_block())
     reply = complete(prompt, provider=provider, **chat_kw)
     try:
-        return parse_card(reply)
+        card = parse_card(reply)
     except CardError:
         repair = (prompt + "\n\nYour previous reply was not valid JSON. "
                   "Reply with ONLY the JSON object.")
-        return parse_card(complete(repair, provider=provider, **chat_kw))
+        card = parse_card(complete(repair, provider=provider, **chat_kw))
+    return validate_card(card, provider=provider, **chat_kw)
 
 
 # run-level backoff when the provider rate-limits beyond chat()'s own
@@ -234,7 +401,9 @@ ABORT_AFTER_CONSECUTIVE = 10
 # instead of redoing the biggest threads from the top every restart. gen 2 = the
 # directives/lessons/gotchas schema; gen 3 = general-purpose framing + strict
 # taxonomy (snap-to-enum) + artifact/decision disambiguation.
-CARDER_GEN = 3
+CARDER_GEN = 5  # gen 5 = widened gate — per-field critic + repair-or-drop on
+#                 lessons/gotchas/directives/decisions/cues/salient_entities, plus
+#                 card_quality metrics. (gen 4 = rule-fields only.)
 # large free OpenRouter models to round-robin across when one is congested
 # (per-model rate-limits are independent; the daily account cap is shared).
 # Skips tiny models (laguna/xs) — these are 30B+ and the 120B gpt-oss.
@@ -367,13 +536,30 @@ def log_attempt(db_path, prompt_id, provider, model, ok, reason=None):
         pass
 
 
+def threads_with_rules(db_path: str):
+    """prompt_ids of cards carrying rule-like signal (lessons / gotchas /
+    directives) — the ONLY threads whose extraction junk matters, so the only
+    ones a quality re-card needs to touch (~a third of the corpus, not all)."""
+    conn = fdb.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT prompt_id FROM cards WHERE "
+            "(lessons    NOT IN ('','[]','null') AND lessons    IS NOT NULL) OR "
+            "(gotchas    NOT IN ('','[]','null') AND gotchas    IS NOT NULL) OR "
+            "(directives NOT IN ('','[]','null') AND directives IS NOT NULL)"
+        ).fetchall()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
+
+
 def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
               model=None, on_progress=None, dry_run: bool = False,
               thread_retries: int = 3, backoff_schedule=RUN_BACKOFFS,
               abort_after: int = ABORT_AFTER_CONSECUTIVE,
               sleep_fn=None, project=None, on_state=None,
               provider="openrouter", should_stop=None, session=None,
-              recard: bool = False,
+              recard: bool = False, prompt_ids=None,
               **chat_kw) -> dict:
     """on_state, if given, receives a dict after every thread:
     {done, total, generated, failed} — drives UI progress bars."""
@@ -429,7 +615,10 @@ def run_cards(db_path: str, limit: int = 0, min_tokens: int = 200,
             pass
 
     todo = []
+    pidset = set(prompt_ids) if prompt_ids is not None else None
     for prompt_id, est_tokens, card_gen in rows:
+        if pidset is not None and prompt_id not in pidset:
+            continue
         has_card = card_gen is not None
         if has_card and not recard:
             stats["skipped_existing"] += 1

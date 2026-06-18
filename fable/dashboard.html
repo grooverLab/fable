@@ -10,7 +10,7 @@
 :root{
   --ink:#0b0d10; --ink2:#111419; --ink3:#171b22; --line:#232a35;
   --phos:#ffb454; --phos-dim:#8a6a3a; --ember:#ff6b35;
-  --text:#cdd6e4; --dim:#6b7689; --faint:#3d4654;
+  --text:#cdd6e4; --dim:#6b7689; --faint:#5a6577;
   --green:#7dd87d; --red:#ff5d5d; --cyan:#6cc7d9;
   --serif:'Fraunces',serif; --mono:'IBM Plex Mono',monospace;
 }
@@ -464,7 +464,7 @@ button.danger:hover{background:#ff8557}
       <div class="searchrow">
         <select id="g-session"><option value="">all sessions</option></select>
         <button id="g-reload" class="ghost">redraw</button>
-        <span class="hint" style="margin:auto 0">amber=concepts · gray=targets · cyan=wikilinks · phosphor ring=threads · drag, scroll-zoom, click a thread to open it, click a term to search it</span>
+        <span class="hint" style="margin:auto 0">drag · scroll-zoom · click a node to open/search · colors + filters in the toggle bar below</span>
         <i class="info" style="align-self:center" data-tip="HOW THE LINKS WORK: this is an Obsidian-style graph, but you never had to write [[wikilinks]] — links are MINED from the transcripts. Each thread's top terms (concepts = recurring noun phrases ranked by TF-IDF; targets = files/crates/identifiers caught by pattern) become shared nodes when 2+ threads use them. Ember edges are citations (a thread that consumed recalled context from another). Any literal [[wikilink]] that does appear in a transcript is extracted too and shown in cyan — first-class, just never required. Same graph Obsidian would draw if every note had been tagged perfectly, without depending on anyone remembering to tag."></i>
       </div>
       <svg id="graphsvg"></svg>
@@ -1247,7 +1247,8 @@ async function loadGraph(force){
       sel.appendChild(o);
     }));
   }
-  const data=await api("/api/graph",{session:sel.value,cap:120});
+  const onTypes=GRAPH_TYPES.filter(k=>GRAPH_ON[k]).join(",")||"thread,file";
+  const data=await api("/api/graph",{session:sel.value,types:onTypes,cap:300});
   GRAPH_DATA=data;
   ensureGraphToggles();
   drawGraph(data);
@@ -1256,24 +1257,25 @@ async function loadGraph(force){
 $("#g-reload")&&($("#g-reload").onclick=()=>loadGraph(true));
 document.addEventListener("change",e=>{if(e.target.id==="g-session")loadGraph(true)});
 let GRAPH_DATA=null;
-const GRAPH_ON={file:true,topic:true,wikilink:true,semantic:true,citation:true,tag:true};
-const GCOLOR={thread:"#ffb454",file:"#6cc7d9",topic:"#7dd87d",wikilink:"#b48ce0",tag:"#ff79c6"};
+const GRAPH_TYPES=["thread","file","decision","entity","lesson","gotcha","project","rule"];
+const GRAPH_ON={thread:true,file:true,decision:true,project:true,entity:false,lesson:false,gotcha:false,rule:false};
+const GCOLOR={thread:"#ffb454",file:"#6cc7d9",decision:"#7dd87d",entity:"#b48ce0",lesson:"#79c0ff",gotcha:"#ff7b72",project:"#8b949e",rule:"#ffd866"};
 function ensureGraphToggles(){
   if($("#g-toggles"))return;
   const bar=document.createElement("div");
   bar.id="g-toggles";
   bar.style.cssText="display:flex;gap:14px;align-items:center;margin:6px 0 8px;font-size:11px;color:var(--dim)";
-  bar.innerHTML=["file","topic","wikilink","semantic","citation","tag"].map(k=>
+  bar.innerHTML=GRAPH_TYPES.map(k=>
     `<label style="cursor:pointer;display:flex;align-items:center;gap:4px">
-       <input type="checkbox" checked data-gt="${k}">
-       <span style="color:${GCOLOR[k]||"var(--ember)"}">${k==="semantic"?"~ semantic":k==="citation"?"→ citation":"● "+k}</span></label>`).join("")
-    +`<span style="margin-left:auto">click: thread opens · file → time-travel · topic/tag → search</span>`;
+       <input type="checkbox" ${GRAPH_ON[k]?"checked":""} data-gt="${k}">
+       <span style="color:${GCOLOR[k]||"var(--ember)"}">● ${k}</span></label>`).join("")
+    +`<span style="margin-left:auto">toggle a node type to add/remove · click a node to open/search</span>`;
   const svg=document.getElementById("graphsvg");
   svg.parentNode.insertBefore(bar,svg);
   bar.addEventListener("change",e=>{
     const k=e.target.dataset.gt;if(!k)return;
     GRAPH_ON[k]=e.target.checked;
-    if(GRAPH_DATA)drawGraph(GRAPH_DATA);
+    loadGraph(true);          // re-fetch with the new type lens (server-side)
   });
 }
 function drawGraph(raw){
@@ -2458,10 +2460,10 @@ function drawDaily(daily){
       .on("mouseleave",()=>dtip.hide());y0+=v})});
   svg.append("g").attr("transform","translate(0,"+(H-m.b)+")")
     .call(d3.axisBottom(x).tickValues(x.domain().filter((d,i)=>!(i%Math.ceil(data.length/9)))).tickFormat(t=>t.slice(5)))
-    .attr("color","#3d4654").selectAll("text").attr("fill","#6b7689").style("font-size","9px");
+    .attr("color","#5a6577").selectAll("text").attr("fill","#6b7689").style("font-size","9px");
   svg.append("g").attr("transform","translate("+m.l+",0)")
     .call(d3.axisLeft(y).ticks(4).tickFormat(v=>"$"+fmt(v)))
-    .attr("color","#3d4654").selectAll("text").attr("fill","#6b7689").style("font-size","9px");
+    .attr("color","#5a6577").selectAll("text").attr("fill","#6b7689").style("font-size","9px");
 }
 function drawDonut(byModel){
   const svg=d3.select("#ch-donut");if(svg.empty())return;
@@ -2783,11 +2785,23 @@ async function loadSettings(){
     <label style="font-size:12px;color:var(--text);cursor:pointer">
       <input type="checkbox" id="ext-on" ${cfg.externalize_enabled?"checked":""} onchange="saveExternalize(this.checked)"> remind me to externalise reasoning each turn</label>
     <div class="hint" style="margin-top:6px">${cfg.externalize_enabled?'<b style="color:var(--green)">ON</b> — richer reasoning is captured into memory':'off'}</div>
+  </div>
+  <div style="border:1px solid var(--line);border-radius:6px;padding:14px 16px;margin-top:14px">
+    <div style="font:600 14px var(--serif);color:var(--phos);margin-bottom:8px">HTTP MCP transport
+      <i class="info" data-tip="Exposes every fable MCP tool over HTTP at POST /mcp (same tools as the stdio server). OFF by default — it makes the tools reachable by anything that can hit this port, so it's opt-in. The per-session stdio MCP that Claude Code uses is SEPARATE and always on; this toggle does not affect it. Takes effect immediately (the flag is read per request — no restart)."></i></div>
+    <label style="font-size:12px;color:var(--text);cursor:pointer">
+      <input type="checkbox" id="httpmcp-on" ${cfg.http_mcp?"checked":""} onchange="saveHttpMcp(this.checked)"> serve MCP over HTTP at /mcp</label>
+    <div class="hint" style="margin-top:6px">${cfg.http_mcp?'<b style="color:var(--phos)">ON</b> — POST /mcp is live · stdio MCP (Claude) unaffected':'off — /mcp returns 403 · stdio MCP (Claude) still running'}</div>
   </div>`;
 }
 async function saveExternalize(on){
   await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({externalize_enabled:!!on})});
+  loadSettings();
+}
+async function saveHttpMcp(on){
+  await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({http_mcp:!!on})});
   loadSettings();
 }
 async function saveRecard(on){

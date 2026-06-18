@@ -111,6 +111,7 @@ HOOK_EVENTS = {
     "Stop": {},
     "SubagentStop": {},
     "PreCompact": {"timeout": 120},
+    "PreToolUse": {"matcher": "Edit|Write|MultiEdit", "timeout": 20},
     "PostToolUse": {"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read"
                                "|TaskCreate|TaskUpdate"},
 }

@@ -402,6 +402,88 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "fable_blast_radius",
+        "description": (
+            "BEFORE EDITING A FILE — the past work that already touched it, so "
+            "you don't relitigate a settled choice or repeat a known trap. WHEN: "
+            "you're about to Edit/Write a file or planning a change to one — "
+            "check here first. HOW: pass a file path (loose match — 'cards.py', "
+            "'fable/cards.py', or absolute). RETURNS: the threads that edited it "
+            "(most recent first) with their decisions / gotchas / lessons, plus "
+            "files that co-change with it (likely need updating too). DRILL IN: "
+            "fable_thread(prompt_id) for a thread's full context, or "
+            "fable_provenance(file) for just the decision lineage. (Also "
+            "auto-fires on Edit/Write via a hook; call it explicitly when "
+            "planning.)"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description":
+                         "file path to look up (loose match)"},
+                "limit": {"type": "integer", "default": 8},
+            },
+            "required": ["file"],
+        },
+    },
+    {
+        "name": "fable_provenance",
+        "description": (
+            "WHY IS THIS FILE LIKE THIS — the decisions that shaped a file, "
+            "newest first, each 'chose X over Y because Z' with the thread + "
+            "date it was decided. WHEN: before changing an established choice, "
+            "or when you/the user ask why a file or design is the way it is. "
+            "HOW: pass a file path (loose match). RETURNS: a ranked decision "
+            "list with prompt_ids — fable_thread(prompt_id) for the full "
+            "reasoning, or fable_blast_radius(file) for the wider picture "
+            "(gotchas + co-changed files)."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string"},
+                "limit": {"type": "integer", "default": 12},
+            },
+            "required": ["file"],
+        },
+    },
+    {
+        "name": "fable_neighbors",
+        "description": (
+            "WHAT RELATES TO X — nodes connected to a file, entity, decision, "
+            "thread, rule, or project in fable's memory graph. WHEN: you want the "
+            "context around something — what touched a file, what a decision "
+            "connects to, what a concept spans. HOW: pass a loose ref (file path, "
+            "entity/concept name, or a thread prompt_id); hops=2 widens to the "
+            "next ring. RETURNS: typed, ranked neighbors with the relation + "
+            "level. Drill in with fable_thread(ref) or fable_blast_radius(file)."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {"type": "string", "description":
+                         "loose ref: file path, entity/concept, or prompt_id"},
+                "hops": {"type": "integer", "default": 1},
+                "limit": {"type": "integer", "default": 20},
+            },
+            "required": ["node"],
+        },
+    },
+    {
+        "name": "fable_path",
+        "description": (
+            "HOW DOES A RELATE TO B — the shortest connection between two things "
+            "in the memory graph (a file and a decision, two concepts, a rule and "
+            "a file). WHEN: you suspect two things are linked and want the chain. "
+            "HOW: pass two loose refs (a, b). RETURNS: the node chain (or a "
+            "no-connection note); fable_thread any thread node in it for detail."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+            },
+            "required": ["a", "b"],
+        },
+    },
 ]
 
 
@@ -742,6 +824,25 @@ def _call_tool(db_path, name, args):
     if name == "fable_resume":
         from fable.recall import resume
         return json.dumps(resume(db_path, project=args.get("project")),
+                          indent=1)
+    if name == "fable_blast_radius":
+        from fable.graph import blast_radius
+        return json.dumps(blast_radius(db_path, args.get("file", ""),
+                                       limit=int(args.get("limit", 8))),
+                          indent=1)
+    if name == "fable_provenance":
+        from fable.graph import provenance
+        return json.dumps(provenance(db_path, args.get("file", ""),
+                                     limit=int(args.get("limit", 12))),
+                          indent=1)
+    if name == "fable_neighbors":
+        from fable.graph import neighbors
+        return json.dumps(neighbors(db_path, args.get("node", ""),
+                                    hops=int(args.get("hops", 1)),
+                                    limit=int(args.get("limit", 20))), indent=1)
+    if name == "fable_path":
+        from fable.graph import path
+        return json.dumps(path(db_path, args.get("a", ""), args.get("b", "")),
                           indent=1)
     raise KeyError(f"unknown tool: {name}")
 

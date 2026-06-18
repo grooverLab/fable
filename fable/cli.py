@@ -101,6 +101,13 @@ def cmd_watch(args):
                             line += f", embedded {e['embedded']} new cards"
                 except Exception:
                     pass
+            if stats.get("records_indexed"):
+                try:                    # refresh the memory graph (blast radius)
+                    from fable.graph import build_edges
+                    g = build_edges(args.db)
+                    line += f", graph {g['nodes']}n/{g['edges']}e"
+                except Exception:
+                    pass
             print(f"[{time.strftime('%H:%M:%S')}] {line}", flush=True)
         except Exception as e:
             print(f"watch cycle failed (will retry): {e}", file=sys.stderr)
@@ -358,6 +365,11 @@ def build_parser():
     sp.add_argument("--project", help="limit discovery to one project")
     sp.add_argument("--no-embed", action="store_true")
     sp.set_defaults(fn=cmd_watch)
+
+    sp = sub.add_parser("graph", help="rebuild the memory graph "
+                                      "(blast-radius / provenance edges)")
+    sp.set_defaults(fn=lambda a: __import__(
+        "fable.graph", fromlist=["cmd_graph"]).cmd_graph(a))
 
     sp = sub.add_parser("remember", help="store a durable cross-session fact")
     sp.add_argument("fact", nargs="+")
