@@ -16,5 +16,8 @@ build/
 # brainstorm visual companion working files
 .superpowers/
 
+# locally-installed Claude Code skills / session tooling — never part of fable
+.claude/
+
 # V.A.U.L.T. UI-rebuild — local only, never pushed (dev or public)
 UI-rebuild/
