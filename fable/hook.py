@@ -680,11 +680,25 @@ def run_hook(db_path: str, payload: dict) -> dict:
     session = payload.get("session_id", "?")
 
     if event == "PreToolUse":
+        tool = payload.get("tool_name") or ""
+        # compaction-read gate: a just-compacted session must READ (and attest)
+        # its recovery threads before any edit — DENY until the gate is clear.
+        # Fails open: a gate error must never wedge editing.
+        if (tool in ("Edit", "Write", "MultiEdit")
+                and os.environ.get("FABLE_COMPACTION_GATE", "on").lower()
+                not in ("off", "0", "false", "no")):
+            try:
+                from fable import gate
+                pend = gate.pending(db_path, session)
+                if pend:
+                    return {"ok": True, "event": "PreToolUse",
+                            "deny": gate.deny_message(pend)}
+            except Exception:
+                pass
         # graph: before an Edit/Write, inject the target file's BLAST RADIUS —
         # the past threads + decisions that touched it — so the model doesn't
         # relitigate a settled call or repeat a known trap. Silent when the file
         # has no recorded history (no nagging on greenfield files).
-        tool = payload.get("tool_name") or ""
         if tool in ("Edit", "Write", "MultiEdit"):
             inp = payload.get("tool_input") or {}
             fp = inp.get("file_path") or inp.get("path") or ""
@@ -766,6 +780,11 @@ def run_hook(db_path: str, payload: dict) -> dict:
             healed = _compaction_recovery(db_path, session)
             if healed:
                 parts.append(healed)
+            try:                            # ARM the hard gate — the soft
+                from fable import gate      # directive above isn't enough; block
+                gate.arm(db_path, session)  # edits until the threads are attested
+            except Exception:
+                pass
         else:
             parts.append(
                 "📚 fable recall is available (MCP tools fable_search, "
@@ -833,19 +852,8 @@ def _compaction_recovery(db_path: str, session_id: str, limit: int = 18) -> str:
     reading each IN FULL via fable_thread (not the lossy summary, not the card
     titles) — those threads ARE the working context. Includes uncarded recent
     threads (the latest turns matter most and may not be carded yet)."""
-    try:
-        from fable import db as fdb
-        conn = fdb.connect(db_path)
-    except FileNotFoundError:
-        return ""
-    try:
-        own = [r for r in conn.execute(
-            "SELECT t.prompt_id, c.title FROM threads t "
-            "LEFT JOIN cards c ON c.prompt_id = t.prompt_id "
-            "WHERE t.session_id = ? ORDER BY t.last_ts DESC LIMIT ?",
-            (session_id, limit)).fetchall() if r[0]]
-    finally:
-        conn.close()
+    from fable import gate
+    own = gate.recovery_threads(db_path, session_id, limit)
     if not own:
         return ""
     L = ['<fable-memory source="compaction-recovery">',
@@ -877,7 +885,12 @@ def cmd_hook(args) -> int:
     try:
         payload = json.loads(sys.stdin.read() or "{}")
         result = run_hook(args.db, payload)
-        if result.get("inject"):
+        if result.get("deny"):
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": result["deny"]}}))
+        elif result.get("inject"):
             print(json.dumps({"hookSpecificOutput": {
                 "hookEventName": result.get("event", "SessionStart"),
                 "additionalContext": result["inject"]}}))
@@ -886,7 +899,7 @@ def cmd_hook(args) -> int:
         _log(args.db, json.dumps({"payload_event":
                                   payload.get("hook_event_name"),
                                   **{k: v for k, v in result.items()
-                                     if k != "inject"}}))
+                                     if k not in ("inject", "deny")}}))
     except Exception:
         _log(args.db, "hook error:\n" + traceback.format_exc())
     return 0

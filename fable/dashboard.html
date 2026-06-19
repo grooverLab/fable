@@ -2023,15 +2023,27 @@ async function loadCards(session){
     grade:c.grade,gen_attempts:c.gen_attempts,gen_fails:c.gen_fails,tags:c.tags
   })).join("")}</div>`:'<div class="empty">no cards match this filter</div>');
 }
+let TRIAGE_TAB="tags", TRIAGE_DROPS=[];
 async function loadTriage(){
   const view=$("#view-triage");
+  const dd=await api("/api/card-drops").catch(()=>({total:0}));
+  const tab=(id,label,sub)=>{const on=TRIAGE_TAB===id;return `<button onclick="setTriageTab('${id}')" style="background:none;border:none;cursor:pointer;padding:8px 13px;margin-bottom:-1px;border-bottom:2px solid ${on?'var(--phos)':'transparent'};color:${on?'var(--phos)':'var(--dim)'};font-size:13px;font-weight:${on?600:400}">${label} <span class="hint">${sub}</span></button>`;};
+  view.innerHTML=`<div style="margin-bottom:12px"><b style="color:var(--phos);font:600 16px var(--serif)">Triage</b><span class="hint"> · review suspicious entries before they enter — or stay out of — memory</span></div>
+    <div style="display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--line)">${tab("tags","Tags","invented vocab")}${tab("drops","Dropped entries",(dd.total||0)+" pending")}</div>
+    <div id="triage-body"><div class="loading">loading…</div></div>`;
+  if(TRIAGE_TAB==="drops")return loadTriageDrops();
+  loadTriageTags();
+}
+function setTriageTab(id){TRIAGE_TAB=id;loadTriage();}
+async function loadTriageTags(){
+  const host=$("#triage-body");if(!host)return;
   const d=await api("/api/tags/proposed").catch(()=>({proposed:[],total:0}));
   const prop=(d&&d.proposed)||[];
   const byFam={};
   prop.forEach(p=>{(byFam[p.family]=byFam[p.family]||[]).push(p)});
   const fams=Object.keys(byFam).sort((a,b)=>byFam[b].length-byFam[a].length);
   const chip=p=>`<span class="badge" style="margin:2px 3px">${esc(p.value)} <span style="color:var(--dim)">${p.threads}</span> <span class="bf-btn" style="color:var(--green)" title="promote to known vocabulary" onclick="promoteTag('${esc(p.family)}','${esc(p.value)}')">✓</span> <span class="bf-btn" style="color:var(--ember)" title="dismiss (blacklist)" onclick="dismissTag('${esc(p.family)}','${esc(p.value)}')">✕</span></span>`;
-  view.innerHTML=`<div style="margin-bottom:14px"><b style="color:var(--phos);font:600 16px var(--serif)">Triage</b><span class="hint"> · ${d.total||0} invented tags across ${fams.length} families · <b>domain</b> is locked (never appears here)</span></div>
+  host.innerHTML=`<div class="hint" style="margin-bottom:10px">${d.total||0} invented tags across ${fams.length} families · <b>domain</b> is locked (never appears here)</div>
     <div class="genwrap" style="margin-bottom:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <b style="color:var(--phos)">auto-triage</b><span class="hint">promote everything seen in ≥</span>
       <input id="tri-thresh" type="number" value="10" min="2" style="width:58px">
@@ -2039,6 +2051,29 @@ async function loadTriage(){
       <button class="ghost" onclick="autoPromote()">promote all above threshold</button>
       <span class="hint" style="margin-left:auto">promoted values become known vocab the carder prefers next run</span></div>
     ${fams.length?fams.map(f=>`<div class="genwrap" style="margin-bottom:10px"><b style="color:var(--cyan)">${esc(f)}</b> <span class="hint">${byFam[f].length}</span><div style="margin-top:8px">${byFam[f].slice(0,100).map(chip).join("")}</div></div>`).join(""):'<div class="empty">nothing to triage — every tag is already known vocabulary</div>'}`;
+}
+async function loadTriageDrops(){
+  const host=$("#triage-body");if(!host)return;
+  const d=await api("/api/card-drops").catch(()=>({drops:[],total:0}));
+  TRIAGE_DROPS=(d&&d.drops)||[];TRIAGE_DROPS.forEach((x,i)=>x._i=i);
+  const byField={};TRIAGE_DROPS.forEach(x=>{(byField[x.field]=byField[x.field]||[]).push(x)});
+  const fields=Object.keys(byField).sort((a,b)=>byField[b].length-byField[a].length);
+  const RC={placeholder:"#e0635c",generic:"#cf9b3f"};
+  const chip=x=>`<span class="badge" style="margin:3px;display:inline-flex;align-items:center;gap:6px;max-width:560px;vertical-align:top">`+
+    `<span title="reason: ${esc(x.reason)}" style="color:${RC[x.reason]||'var(--dim)'};flex:none">●</span>`+
+    `<span style="white-space:normal;word-break:break-word">${esc(x.value)}</span>`+
+    `<span style="color:var(--dim);flex:none">×${x.threads}</span>`+
+    `<span class="bf-btn" title="keep: gate false positive → restore to the card(s)" style="color:var(--green);flex:none" onclick="keepDropAt(${x._i})">↩keep</span>`+
+    `<span class="bf-btn" title="confirm: correctly dropped" style="color:var(--ember);flex:none" onclick="dropDropAt(${x._i})">✕drop</span></span>`;
+  host.innerHTML=`<div class="hint" style="margin-bottom:12px">${d.total||0} suspicious entries the quality gate removed · <b style="color:var(--green)">keep</b> = gate was wrong (restore) · <b style="color:var(--ember)">drop</b> = correctly removed · ● = reason</div>`+
+    (fields.length?fields.map(f=>`<div class="genwrap" style="margin-bottom:10px"><b style="color:var(--cyan)">${esc(f)}</b> <span class="hint">${byField[f].length}</span><div style="margin-top:8px">${byField[f].slice(0,150).map(chip).join("")}</div></div>`).join(""):'<div class="empty">no suspicious entries pending — the gate has nothing queued for review</div>');
+}
+async function keepDropAt(i){const x=TRIAGE_DROPS[i];if(x)triageDrop("keep",x);}
+async function dropDropAt(i){const x=TRIAGE_DROPS[i];if(x)triageDrop("confirm",x);}
+async function triageDrop(action,x){
+  const r=await fetch("/api/card-drops/triage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,field:x.field,value:x.value})}).then(z=>z.json()).catch(()=>({}));
+  toast(action==="keep"?`restored to ${r.restored||0} card(s)`:"drop confirmed");
+  loadTriageDrops();
 }
 async function autoPromote(){
   const th=parseInt(($("#tri-thresh")||{}).value)||10;
@@ -2050,7 +2085,7 @@ function refreshTriage(){
   else if($("#dash-tags"))loadTagPanel();
 }
 /* ── Rules tab: auto-mined directive-rules (rules.py) ── */
-let RULES_DATA=null, RULES_F={status:"candidate",src:null};
+let RULES_DATA=null, RULES_F={status:null,src:null};
 const RSTAT={candidate:["○","var(--cyan)"],active:["✓","var(--green)"],
   muted:["◌","var(--dim)"],rejected:["✗","var(--faint)"],subthreshold:["·","var(--faint)"]};
 async function loadRules(force){
@@ -2074,32 +2109,36 @@ function renderRules(){
   const v=$("#view-rules"), d=RULES_DATA, f=RULES_F;
   if(!d){v.innerHTML='<div class="empty">could not load rules</div>';return;}
   const bs=d.by_status||{}, sc=d.sources||{};
+  const met=r=>(r.occurrence_count>=3 && r.session_count>=2);   // ≥3× / ≥2 sessions
   let rs=d.rules.filter(r=>(!f.status||r.status===f.status)&&(!f.src||r.source===f.src));
-  const pill=(k,lbl)=>`<span class="bf-btn" style="${f.status===k?'background:var(--phos);color:#04130c;border-color:var(--phos)':''}" onclick="ruleFilter('status',${k?`'${k}'`:'null'})">${lbl}${k&&bs[k]?' '+bs[k]:''}</span>`;
+  rs.sort((a,b)=>(met(b)-met(a))||(b.occurrence_count-a.occurrence_count)||(b.session_count-a.session_count));
+  const pill=(k,lbl)=>`<span class="bf-btn" style="${(f.status||null)===k?'background:var(--phos);color:#04130c;border-color:var(--phos)':''}" onclick="ruleFilter('status',${k?`'${k}'`:'null'})">${lbl}${k&&bs[k]?' '+bs[k]:''}</span>`;
   const spill=(k,lbl)=>`<span class="bf-btn" style="${(f.src||null)===k?'background:var(--cyan);color:#04130c;border-color:var(--cyan)':''}" onclick="ruleFilter('src',${k?`'${k}'`:'null'})">${lbl}${k&&sc[k]?' '+sc[k]:''}</span>`;
-  const row=r=>{const s=RSTAT[r.status]||RSTAT.subthreshold, ev=(r.evidence||[])[0];
-    return `<div class="genwrap" style="margin-bottom:7px;padding:10px 12px;display:flex;align-items:flex-start;gap:10px">
+  const scopeBtn=(r,val,lbl)=>`<span class="bf-btn" title="inject ${val==='global'?'in every project':'only in its origin project'}" onclick="ruleTriage(${r.id},'edit',{scope:'${val}'})" style="padding:1px 7px;font-size:10px;${(r.scope||'global')===val?'background:var(--cyan);color:#04130c;border-color:var(--cyan)':''}">${lbl}</span>`;
+  const row=r=>{const s=RSTAT[r.status]||RSTAT.subthreshold, ev=(r.evidence||[])[0], m=met(r);
+    return `<div class="genwrap" style="margin-bottom:7px;padding:10px 12px;display:flex;align-items:flex-start;gap:10px;border-left:3px solid ${m?'var(--phos)':'transparent'};${m?'':'opacity:.7'}">
       <div style="flex:1;min-width:0">
         <div style="color:var(--text);font-size:13px">${esc(r.display_text||r.canonical_text)}</div>
         <div class="hint" style="margin-top:4px">
           <span style="color:${s[1]}">${s[0]} ${esc(r.status)}</span> · <b>${esc(r.source)}</b> ·
-          seen <b>${r.occurrence_count}×</b> · ${r.session_count} sessions · ${r.project_count} ${r.project_count===1?'project':'projects'} ·
-          <span class="badge">${esc(r.scope)}${r.project?':'+esc(r.project):''}</span>
+          seen <b>${r.occurrence_count}×</b> · ${r.session_count} sessions · ${r.project_count} ${r.project_count===1?'project':'projects'}
+          ${m?' · <span style="color:var(--phos)">✦ threshold met</span>':' · <span style="color:var(--faint)">below threshold</span>'}
           ${ev?` · <span style="cursor:pointer;color:var(--cyan)" onclick="openThread('${ev}')">evidence ↗</span>`:''}
+          <br><span style="color:var(--dim)">inject:</span> ${scopeBtn(r,'global','⊕ global')} ${scopeBtn(r,'project','⊙ '+(r.project?esc(r.project):'project'))}
         </div></div>
       <div style="display:flex;gap:5px;white-space:nowrap">
-        ${r.status!=='active'?`<span class="bf-btn" title="approve → standing rule" onclick="ruleTriage(${r.id},'approve')" style="color:var(--green)">✓ keep</span>`:''}
+        ${r.status!=='active'?`<span class="bf-btn" title="approve → standing rule (works even below threshold)" onclick="ruleTriage(${r.id},'approve')" style="color:var(--green)">✓ keep</span>`:''}
         ${r.status!=='muted'?`<span class="bf-btn" title="mute (keep, don't inject)" onclick="ruleTriage(${r.id},'mute')">◌</span>`:''}
         ${r.status!=='rejected'?`<span class="bf-btn" title="reject (never resurface)" onclick="ruleTriage(${r.id},'reject')" style="color:var(--ember)">✗</span>`:''}
       </div></div>`;};
   v.innerHTML=`<div style="margin-bottom:12px"><b style="color:var(--phos);font:600 16px var(--serif)">Rules</b>
-      <span class="hint"> · standing directives you've repeated, clustered — approve to make them stick (automates /remember)</span>
+      <span class="hint"> · repeated directives, learnings &amp; gotchas — <span style="color:var(--phos)">✦ threshold-met</span> float to the top; approve ANY (even below threshold) to make it stick, and choose its inject scope</span>
       <span class="bf-btn" style="float:right" onclick="rulesRecluster()">↻ re-cluster</span></div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-      ${pill('candidate','candidates')}${pill('active','active')}${pill('muted','muted')}${pill('rejected','rejected')}${pill(null,'all')}</div>
+      ${pill(null,'all')}${pill('candidate','candidates')}${pill('active','active')}${pill('muted','muted')}${pill('rejected','rejected')}${pill('subthreshold','below threshold')}</div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
       ${spill(null,'all sources')}${spill('directive','directives')}${spill('lesson','lessons')}${spill('gotcha','gotchas')}</div>
-    <div class="results">${rs.map(row).join("")||'<div class="empty">no rules here yet — run the re-card to populate directives, then candidates surface (≥3× across ≥2 sessions)</div>'}</div>`;
+    <div class="results">${rs.map(row).join("")||'<div class="empty">no rules yet — run the re-card to populate directives / lessons / gotchas</div>'}</div>`;
 }
 
 /* ── Tasks tab: the durable backlog (tasktime) ── */

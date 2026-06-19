@@ -55,6 +55,25 @@ CREATE INDEX IF NOT EXISTS idx_edges_dst_rel ON edges(dst, rel);
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit")
 _MAX_COCHANGE_FILES = 15   # skip co_change pairs for mega-threads (n² guard)
 
+# Global / transient paths that are NOT a project's source. The global CLAUDE.md
+# is edited from EVERY project; transcripts/temp dirs are cross-cutting too.
+# Indexing them turns the graph into a cross-project hub — blast-radius would
+# then leak threads + co-changes across unrelated projects. Excluded from the
+# file scan so a file node belongs to exactly one project tree.
+_HOME = os.path.expanduser("~")
+_NONPROJECT_PREFIXES = (
+    os.path.join(_HOME, ".claude") + os.sep,   # global CLAUDE.md, transcripts, skills, memory
+    "/tmp/", "/private/tmp/", "/private/var/", "/var/folders/", "/var/tmp/",
+)
+
+
+def _is_project_file(path: str) -> bool:
+    """True for a real source file inside a project tree — not a global config
+    file, a transcript, or a temp path touched across every project."""
+    p = path or ""
+    return bool(p) and not p.startswith(_NONPROJECT_PREFIXES) \
+        and not p.endswith(".jsonl")
+
 
 def ensure_schema(conn):
     conn.executescript(_GRAPH_DDL)
@@ -95,7 +114,7 @@ def _thread_file_touches(conn) -> dict:
                     and b.get("name") in _EDIT_TOOLS):
                 inp = b.get("input") or {}
                 fp = inp.get("file_path") or inp.get("path")
-                if fp and isinstance(fp, str):
+                if fp and isinstance(fp, str) and _is_project_file(fp):
                     per.setdefault(pid, {})
                     per[pid][fp] = per[pid].get(fp, 0) + 1
                     allpaths.add(fp)

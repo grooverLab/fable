@@ -293,6 +293,78 @@ def post_tags_autopromote(db_path, body):
     return {"ok": True, "count": len(promoted), "promoted": promoted}
 
 
+# ── carder gate triage: suspicious entries the quality gate dropped ──────────
+_DROP_FIELDS = {"lessons", "gotchas", "directives", "decisions", "cues",
+                "salient_entities"}
+
+
+def api_card_drops(db_path, params):
+    """Gate-dropped entries awaiting human triage — the suspicious lessons/cues/
+    entities the quality gate removed. Grouped by (field,value) with a thread
+    count so a human can CONFIRM the drop or KEEP it (gate false positive →
+    restored to the cards). This is the audit trail for gate precision."""
+    conn = fdb.connect(db_path)
+    try:
+        has = conn.execute("SELECT name FROM sqlite_master WHERE type='table'"
+                           " AND name='card_drops'").fetchone()
+        rows = conn.execute(
+            "SELECT field, value, reason, COUNT(DISTINCT prompt_id) n,"
+            " GROUP_CONCAT(DISTINCT prompt_id) pids FROM card_drops"
+            " WHERE status='pending' GROUP BY field, value"
+            " ORDER BY n DESC, field LIMIT 500").fetchall() if has else []
+    finally:
+        conn.close()
+    drops = [{"field": f, "value": v, "reason": r, "threads": n,
+              "prompt_ids": (pids or "").split(",")[:50]}
+             for f, v, r, n, pids in rows]
+    by_field = {}
+    for d in drops:
+        by_field[d["field"]] = by_field.get(d["field"], 0) + 1
+    return {"drops": drops, "by_field": by_field, "total": len(drops)}
+
+
+def post_card_drops_triage(db_path, body):
+    """Triage a gate-dropped (field,value). action='keep' → restore it to every
+    card it was dropped from (the gate was wrong); action='confirm' → uphold the
+    drop. Applies across all still-pending threads for that (field,value)."""
+    field = (body.get("field") or "").strip()
+    value = body.get("value")
+    action = body.get("action", "confirm")
+    if field not in _DROP_FIELDS:           # whitelist — field is interpolated
+        return {"ok": False, "error": "unknown field"}
+    conn = fdb.connect(db_path)
+    restored = 0
+    try:
+        pend = conn.execute(
+            "SELECT DISTINCT prompt_id FROM card_drops WHERE field=? AND value=?"
+            " AND status='pending'", (field, value)).fetchall()
+        if action == "keep":
+            for (pid,) in pend:
+                row = conn.execute(
+                    f"SELECT {field} FROM cards WHERE prompt_id=?",
+                    (pid,)).fetchone()
+                if not row:
+                    continue
+                try:
+                    arr = json.loads(row[0] or "[]")
+                except (ValueError, TypeError):
+                    arr = []
+                if value not in arr:
+                    arr.append(value)
+                    conn.execute(f"UPDATE cards SET {field}=? WHERE prompt_id=?",
+                                 (json.dumps(arr), pid))
+                    restored += 1
+            conn.execute("UPDATE card_drops SET status='kept' WHERE field=? AND"
+                         " value=? AND status='pending'", (field, value))
+        else:
+            conn.execute("UPDATE card_drops SET status='confirmed' WHERE field=?"
+                         " AND value=? AND status='pending'", (field, value))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "action": action, "field": field, "restored": restored}
+
+
 def _session_cwd(db_path, session_id):
     """The real cwd of a session, read from its transcript records."""
     live = _live_path(db_path, session_id)
@@ -1366,6 +1438,7 @@ ROUTES["/api/costs"] = api_costs
 ROUTES["/api/dashboard"] = api_dashboard
 ROUTES["/api/tags"] = api_tags
 ROUTES["/api/tags/proposed"] = api_tags_proposed
+ROUTES["/api/card-drops"] = api_card_drops
 ROUTES["/api/export"] = api_export
 ROUTES["/api/files"] = api_files
 def api_filediff2(db_path, params):
@@ -1850,6 +1923,7 @@ POST_ROUTES["/api/tags/promote"] = post_tags_promote
 POST_ROUTES["/api/tags/snap"] = post_tags_snap
 POST_ROUTES["/api/tags/blacklist"] = post_tags_blacklist
 POST_ROUTES["/api/tags/autopromote"] = post_tags_autopromote
+POST_ROUTES["/api/card-drops/triage"] = post_card_drops_triage
 POST_ROUTES["/api/tasks/rebuild"] = post_tasks_rebuild
 POST_ROUTES["/api/tasks/meta"] = post_tasks_meta
 POST_ROUTES["/api/rules/triage"] = post_rules_triage

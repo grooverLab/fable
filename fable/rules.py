@@ -248,12 +248,15 @@ def recluster(db_path, min_occ=3, min_sessions=2):
                 status = prev[0]
                 if status == "subthreshold" and is_cand:
                     status = "candidate"
+                # PRESERVE scope/project — they are user-selectable (the global↔
+                # project toggle) and must survive the recluster-on-read, so the
+                # auto value is only a one-time default set at INSERT below.
                 conn.execute(
-                    "UPDATE rules SET display_text=?, status=?, scope=?, project=?,"
+                    "UPDATE rules SET display_text=?, status=?,"
                     " occurrence_count=?, session_count=?, project_count=?,"
                     " evidence=?, last_seen=?, updated_at=? "
                     "WHERE canonical_text=? AND source=?",
-                    (display, status, scope, project, occ, nsess, nproj,
+                    (display, status, occ, nsess, nproj,
                      evidence, g["last"], now, canon, source))
             else:
                 conn.execute(
@@ -316,7 +319,10 @@ def render_rules(db_path, project=None):
     except Exception:
         return ""
     if project:
-        active = [r for r in active if not r.get("project")
+        # global-scope rules inject everywhere; project-scope rules only when the
+        # current project matches their origin (the user's manual scope choice)
+        active = [r for r in active
+                  if (r.get("scope") or "global") == "global"
                   or project.lower() in (r.get("project") or "").lower()]
     if not active:
         return ""

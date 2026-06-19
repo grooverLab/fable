@@ -270,12 +270,18 @@ def validate_card(card, provider="openrouter", **chat_kw):
     error the card passes through unchanged (carding > the gate)."""
     gen = {f: len(card.get(f) or []) for f in _GATED_FIELDS}
     flagged = {f: 0 for f in _GATED_FIELDS}
+    dropped = []   # the actual suspicious values (for the metric + triage queue)
     try:
         if any(card.get(f) for f in _GATED_FIELDS):
-            drops = (_structural_drops(card)
-                     | _critic_drops(card, provider, **chat_kw))
-            for (f, _i) in drops:
-                flagged[f] = flagged.get(f, 0) + 1
+            sdrops = _structural_drops(card)
+            drops = sdrops | _critic_drops(card, provider, **chat_kw)
+            for (f, i) in sorted(drops):
+                vals = card.get(f) or []
+                if i < len(vals):
+                    flagged[f] = flagged.get(f, 0) + 1
+                    dropped.append({
+                        "field": f, "value": str(vals[i]),
+                        "reason": "placeholder" if (f, i) in sdrops else "generic"})
             # drop-only fields: a flagged cue/entity is generic — just drop it
             for f in _DROP_ONLY_FIELDS:
                 bad = {i for (ff, i) in drops if ff == f}
@@ -296,6 +302,7 @@ def validate_card(card, provider="openrouter", **chat_kw):
     card["_quality"] = {f: {"generated": gen[f], "flagged": flagged[f],
                             "final": len(card.get(f) or [])}
                         for f in _GATED_FIELDS}
+    card["_drops"] = dropped
     return card
 
 
@@ -309,6 +316,21 @@ def store_card(conn, prompt_id: str, card: dict, source: str, model: str,
         conn.execute("INSERT OR REPLACE INTO card_quality(prompt_id, ts, model, "
                      "gen, report) VALUES(?,?,?,?,?)",
                      (prompt_id, now, model, CARDER_GEN, json.dumps(_q)))
+    _drops = card.pop("_drops", None)          # gate-dropped entries → triage queue
+    if _drops is not None:
+        conn.execute("CREATE TABLE IF NOT EXISTS card_drops(id INTEGER PRIMARY "
+                     "KEY, prompt_id TEXT, field TEXT, value TEXT, reason TEXT, "
+                     "gen INT, ts TEXT, status TEXT DEFAULT 'pending')")
+        # idempotent per re-card: clear only this thread's still-pending drops
+        # (a human's kept/confirmed verdicts are preserved across re-cards)
+        conn.execute("DELETE FROM card_drops WHERE prompt_id=? AND "
+                     "status='pending'", (prompt_id,))
+        for d in _drops:
+            conn.execute(
+                "INSERT INTO card_drops(prompt_id, field, value, reason, gen, ts,"
+                " status) VALUES(?,?,?,?,?,?,'pending')",
+                (prompt_id, d.get("field"), d.get("value"), d.get("reason"),
+                 CARDER_GEN, now))
     conn.execute(
         "INSERT OR REPLACE INTO cards(prompt_id, title, type, topics,"
         " decisions, ideas, features, lessons, gotchas, open_questions,"

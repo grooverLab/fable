@@ -484,6 +484,31 @@ TOOLS = [
             "required": ["a", "b"],
         },
     },
+    {
+        "name": "fable_attest",
+        "description": (
+            "CLEAR THE COMPACTION-READ GATE — after a compaction fable BLOCKS "
+            "your edits until you have actually read this session's recovery "
+            "threads. WHEN: a tool call was denied with a 'COMPACTION-READ GATE' "
+            "message listing thread UUIDs. HOW: for EACH listed uuid, first "
+            "fable_thread(uuid) to read it, THEN call this with that uuid and a "
+            "one-line summary of what the thread DECIDED — naming its real "
+            "entities/decisions. A generic, empty, or mismatched summary is "
+            "REJECTED (it's validated against the thread's actual content). "
+            "RETURNS ok + which threads still remain. Once all are attested, "
+            "your edits go through."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uuid": {"type": "string", "description":
+                         "the recovery thread's prompt_id (from the gate message)"},
+                "summary": {"type": "string", "description":
+                            "one line: what this thread decided / did, naming its "
+                            "specific entities — validated against the thread"},
+            },
+            "required": ["uuid", "summary"],
+        },
+    },
 ]
 
 
@@ -844,6 +869,10 @@ def _call_tool(db_path, name, args):
         from fable.graph import path
         return json.dumps(path(db_path, args.get("a", ""), args.get("b", "")),
                           indent=1)
+    if name == "fable_attest":
+        from fable import gate
+        return json.dumps(gate.attest(db_path, args.get("uuid", ""),
+                                      args.get("summary", "")), indent=1)
     raise KeyError(f"unknown tool: {name}")
 
 
